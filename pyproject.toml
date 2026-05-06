@@ -1,0 +1,114 @@
+[project]
+name = "clause-extract"
+version = "0.1.0"
+description = "Canonical-record post-processor for SEC EX-10 clause-probability project"
+readme = "README.md"
+requires-python = ">=3.14"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "Arthur Souza Rodrigues" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Text Processing :: Linguistic",
+]
+dependencies = [
+    # Core data + parsing
+    "polars>=1.18.0",
+    "pyarrow>=18.0.0",
+    "pydantic>=2.10.0",
+    "rapidfuzz>=3.14.0",
+    "regex>=2024.11.6",
+    # External parsing libs (the two parsers we compare/feed)
+    "doc2dict>=0.7.1",
+    "lxml>=5.3.0",
+    "beautifulsoup4>=4.12.3",
+    # Logging & CLI
+    "loguru>=0.7.3",
+    "typer>=0.15.1",
+    "rich>=13.9.4",
+    # Dataset I/O
+    "datasets>=3.2.0",
+    "huggingface-hub>=0.27.0",
+    # HTTP / networking (for HF parquet streams)
+    "httpx>=0.28.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-cov>=6.0.0",
+    "pytest-xdist>=3.6.0",
+    "hypothesis>=6.123.0",
+    "ruff>=0.9.0",
+    "ty>=0.0.1a1; python_version >= '3.14'",
+    "respx>=0.22.0",
+    "pre-commit>=4.0.0",
+]
+
+[project.scripts]
+clause-extract = "clause_extract.cli:app"
+
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/clause_extract"]
+
+# ---- Tooling ----
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",   # pycodestyle + pyflakes
+    "I",              # isort
+    "B",              # flake8-bugbear
+    "UP",             # pyupgrade
+    "C4",             # flake8-comprehensions
+    "SIM",            # flake8-simplify
+    "RUF",            # ruff-specific
+    "PT",             # pytest style
+    "PTH",            # use pathlib
+]
+ignore = [
+    "E501",   # line length (handled by formatter)
+    "B008",   # function call in default arg (typer pattern)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]  # allow assert False
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--cov=clause_extract",
+    "--cov-report=term-missing",
+    "--cov-branch",
+]
+markers = [
+    "slow: tests that hit the network or process the full corpus",
+    "sot: tests that fetch the source-of-truth dataset",
+    "corpus: tests that scan the full 1066-doc corpus",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["src/clause_extract"]
+omit = ["*/tests/*", "*/__main__.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

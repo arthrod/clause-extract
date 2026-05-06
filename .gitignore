@@ -1,0 +1,63 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+# --- Virtual envs ---
+.venv/
+venv/
+env/
+.python-version.local
+
+# --- uv ---
+uv.lock
+.uv-cache/
+
+# --- Caches ---
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.cache/
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Secrets (never commit) ---
+.env
+.env.*
+.hf_token
+.github_token
+.openrouter_key
+*.pem
+*_credentials*
+
+# --- Run artifacts (large data, rebuildable) ---
+data/cache/
+data/runs/
+data/local/
+*.parquet
+!tests/fixtures/*.parquet  # do allow tiny fixtures
+
+# --- Notebook checkpoints ---
+.ipynb_checkpoints/
+
+# --- Build artifacts ---
+*.log
+*.tmp

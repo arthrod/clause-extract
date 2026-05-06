@@ -1,3 +1,14 @@
+---
+license: agpl-3.0
+language:
+  - en
+library_name: doc2dict
+tags:
+  - parsing
+  - sec-edgar
+  - legal-nlp
+  - clause-extraction
+---
 # clause-extract
 
 End-to-end parser for SEC EX-10 exhibit agreements. Extracts:

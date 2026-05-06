@@ -71,6 +71,10 @@ uv run clause-extract canonicalize --doc-idx 4
 uv run clause-extract canonicalize --corpus full --push-to-hub
 ```
 
+## For Claude Code
+
+If you're picking up implementation: read [`TASKS.md`](TASKS.md). It's the durable work plan with five phases, acceptance criteria, and validation gates. Start at Phase 0 (environment setup) and don't skip ahead.
+
 ## Validation gates (must pass before merging Phase 5)
 
 1. **`canonical_id_parser` round-trips 973/973 SOT clauses** — every clause_id in the human ledger parses, reconstructs to the same string, and its derived parent is either `None` (root) or another clause_id present in the same ledger.
@@ -82,11 +86,12 @@ uv run clause-extract canonicalize --corpus full --push-to-hub
 | File | Read when |
 |---|---|
 | [`README.md`](README.md) | Now — landing page |
+| [`TASKS.md`](TASKS.md) | First if you're Claude Code — the implementation work plan |
 | [`docs/GOAL.md`](docs/GOAL.md) | First — what we're trying to accomplish, what success looks like, the iterative red/green TDD methodology |
-| [`docs/SCHEMA.md`](docs/SCHEMA.md) | Before implementing the post-processor — canonical record fields, types, derivation rules |
+| [`docs/SCHEMA.md`](docs/SCHEMA.md) | Before implementing the canonicalizer — canonical record fields, types, derivation rules |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | Before challenging a design choice — locked decisions with rationale and what would change our mind |
 | [`docs/DETECTOR.md`](docs/DETECTOR.md) | Before touching subdocument detection — algorithm, validation results, known false-positive/negative patterns |
-| [`docs/HANDOFF.md`](docs/HANDOFF.md) | First if you're Claude Code — what's locked, what's open, validation gates, where artifacts live |
+| [`docs/HANDOFF.md`](docs/HANDOFF.md) | What's locked, what's open, validation gates, where artifacts live |
 
 ## Repository layout
 

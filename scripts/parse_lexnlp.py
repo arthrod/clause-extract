@@ -27,10 +27,21 @@ on block-level tags, then hands that text directly to lexnlp.
 
 Outputs
 -------
-Two parquet files in --output-dir:
+Three files written to --output-dir:
 
     parse_lexnlp_docs.parquet     One row per source document.
     parse_lexnlp_spans.parquet    One row per span, INCLUDING span_text.
+    parse_lexnlp_spans.jsonl      Line-delimited mirror of the spans
+                                  parquet — same content, one span per
+                                  line, `idx` first. Streams during
+                                  parsing so a partial file remains
+                                  readable on crash.
+
+The JSONL has the same fields as the spans parquet (idx, span_id,
+start, end, title, title_start, title_end, level, abs_level, span_chars,
+span_text). It is NOT zstd-compressed and contains the full span text
+uncapped — useful for direct inspection via `cat | jq`, but larger on
+disk than the parquet.
 
 Span fields
 -----------
@@ -266,7 +277,12 @@ def main(
     doc_records: list[dict[str, Any]] = []
     all_span_records: list[dict[str, Any]] = []
 
-    with Progress(
+    # JSONL is written streamingly so a long-running corpus parse leaves a
+    # readable partial file even if it crashes mid-loop. Parquet still
+    # accumulates in memory and is written at the end (matches the existing
+    # pattern; switching parquet to streaming would need a different writer).
+    spans_jsonl_path = output_dir / "parse_lexnlp_spans.jsonl"
+    with spans_jsonl_path.open("w", encoding="utf-8") as spans_jsonl, Progress(
         SpinnerColumn(),
         TextColumn("[bold magenta]lexnlp baseline[/bold magenta]"),
         BarColumn(),
@@ -292,6 +308,14 @@ def main(
             for sp in spans:
                 sp["idx"] = idx
                 all_span_records.append(sp)
+                # Stream the JSONL line with idx ordered first for readability.
+                jsonl_record = {
+                    "idx": sp["idx"],
+                    **{k: v for k, v in sp.items() if k != "idx"},
+                }
+                spans_jsonl.write(
+                    json.dumps(jsonl_record, ensure_ascii=False) + "\n"
+                )
 
             progress.update(
                 task,
@@ -339,6 +363,10 @@ def main(
     spans_path = output_dir / "parse_lexnlp_spans.parquet"
     spans_df.write_parquet(spans_path, compression="zstd")
     logger.info(f"wrote {spans_path}: {len(spans_df)} span rows")
+    logger.info(
+        f"wrote {spans_jsonl_path}: {len(all_span_records)} JSONL lines "
+        f"(streamed during parsing)"
+    )
 
     status_counts = Counter(d["parse_status"] for d in doc_records)
     logger.info("=== status breakdown ===")

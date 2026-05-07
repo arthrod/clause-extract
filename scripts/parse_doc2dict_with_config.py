@@ -27,9 +27,31 @@ Why this isn't just "the same script with a switch":
     SUPERSET of the baseline's information — typed where possible, fallback
     elsewhere.
 
-The body-extraction logic is identical to the baseline. See
-`parse_doc2dict_baseline.py` for the body_direct vs body_recursive
-explanation.
+Outputs
+-------
+Three files written to --output-dir:
+
+    parse_doc2dict_with_config_docs.parquet     One row per source document.
+    parse_doc2dict_with_config_nodes.parquet    One row per section node.
+    parse_doc2dict_with_config_nodes.jsonl      Line-delimited mirror of
+                                                the nodes parquet — same
+                                                content, one section per
+                                                line, `idx` first. Streams
+                                                during parsing so a partial
+                                                file remains readable on
+                                                crash.
+
+The JSONL has the same fields as the nodes parquet (idx, node_id,
+parent_node_id, depth, doc2dict_section_key, cls, title,
+standardized_title, n_direct_section_children, body_direct_chars,
+body_recursive_chars, body_direct, body_recursive). It is NOT
+zstd-compressed and contains the full body text uncapped — useful for
+direct inspection via `cat | jq`, but larger on disk than the parquet.
+
+Body extraction
+---------------
+Identical to `parse_doc2dict_baseline.py`. See that script for the
+body_direct vs body_recursive explanation.
 
 Usage
 -----
@@ -293,7 +315,12 @@ def main(
     doc_records: list[dict[str, Any]] = []
     all_section_records: list[dict[str, Any]] = []
 
-    with Progress(
+    # JSONL is written streamingly so a long-running corpus parse leaves a
+    # readable partial file even if it crashes mid-loop. Parquet still
+    # accumulates in memory and is written at the end (matches the existing
+    # pattern; switching parquet to streaming would need a different writer).
+    nodes_jsonl_path = output_dir / "parse_doc2dict_with_config_nodes.jsonl"
+    with nodes_jsonl_path.open("w", encoding="utf-8") as nodes_jsonl, Progress(
         SpinnerColumn(),
         TextColumn("[bold green]doc2dict + agreement_config[/bold green]"),
         BarColumn(),
@@ -319,6 +346,14 @@ def main(
             for s in sections:
                 s["idx"] = idx
                 all_section_records.append(s)
+                # Stream the JSONL line with idx ordered first for readability.
+                jsonl_record = {
+                    "idx": s["idx"],
+                    **{k: v for k, v in s.items() if k != "idx"},
+                }
+                nodes_jsonl.write(
+                    json.dumps(jsonl_record, ensure_ascii=False) + "\n"
+                )
 
             progress.update(
                 task,
@@ -367,6 +402,10 @@ def main(
     nodes_path = output_dir / "parse_doc2dict_with_config_nodes.parquet"
     nodes_df.write_parquet(nodes_path, compression="zstd")
     logger.info(f"wrote {nodes_path}: {len(nodes_df)} section rows")
+    logger.info(
+        f"wrote {nodes_jsonl_path}: {len(all_section_records)} JSONL lines "
+        f"(streamed during parsing)"
+    )
 
     status_counts = Counter(d["parse_status"] for d in doc_records)
     logger.info("=== status breakdown ===")

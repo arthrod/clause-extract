@@ -45,8 +45,10 @@ The JSONL has the same fields as the nodes parquet (idx, node_id,
 parent_node_id, depth, doc2dict_section_key, cls, title,
 standardized_title, n_direct_section_children, body_direct_chars,
 body_recursive_chars, body_direct, body_recursive). It is NOT
-zstd-compressed and contains the full body text uncapped — useful for
-direct inspection via `cat | jq`, but larger on disk than the parquet.
+zstd-compressed. String fields longer than 4000 chars are truncated to
+`<first 3000>[TRUNCATED]<last 1000>` so the file stays inspection-friendly
+via `cat | jq` / grep / head. The parquet is the source of truth for
+full content.
 
 Body extraction
 ---------------
@@ -116,6 +118,25 @@ def is_image_only(html: str) -> bool:
     visible = _TAG_STRIP.sub(" ", html)
     visible = re.sub(r"\s+", " ", visible).strip()
     return len(visible) < 200 and len(_IMG_TAG.findall(html)) >= 1
+
+
+# JSONL truncation: long fields get summarized for inspection-friendly output.
+# Parquet keeps the full text — this only affects the JSONL writer.
+_JSONL_TRUNCATE_THRESHOLD = 4000
+_JSONL_TRUNCATE_HEAD = 3000
+_JSONL_TRUNCATE_TAIL = 1000
+
+
+def _truncate_for_jsonl(value: Any) -> Any:
+    """If `value` is a string longer than the threshold, return
+    `<head>[TRUNCATED]<tail>`. Otherwise return the value unchanged."""
+    if not isinstance(value, str) or len(value) <= _JSONL_TRUNCATE_THRESHOLD:
+        return value
+    return (
+        value[:_JSONL_TRUNCATE_HEAD]
+        + "[TRUNCATED]"
+        + value[-_JSONL_TRUNCATE_TAIL:]
+    )
 
 
 def _is_section_node(d: Any) -> bool:
@@ -346,10 +367,15 @@ def main(
             for s in sections:
                 s["idx"] = idx
                 all_section_records.append(s)
-                # Stream the JSONL line with idx ordered first for readability.
+                # Stream to JSONL with idx ordered first and long strings truncated
+                # for inspection-friendly output. Parquet stays uncapped.
                 jsonl_record = {
                     "idx": s["idx"],
-                    **{k: v for k, v in s.items() if k != "idx"},
+                    **{
+                        k: _truncate_for_jsonl(v)
+                        for k, v in s.items()
+                        if k != "idx"
+                    },
                 }
                 nodes_jsonl.write(
                     json.dumps(jsonl_record, ensure_ascii=False) + "\n"
@@ -404,7 +430,7 @@ def main(
     logger.info(f"wrote {nodes_path}: {len(nodes_df)} section rows")
     logger.info(
         f"wrote {nodes_jsonl_path}: {len(all_section_records)} JSONL lines "
-        f"(streamed during parsing)"
+        f"(streamed during parsing; strings >{_JSONL_TRUNCATE_THRESHOLD} chars truncated)"
     )
 
     status_counts = Counter(d["parse_status"] for d in doc_records)

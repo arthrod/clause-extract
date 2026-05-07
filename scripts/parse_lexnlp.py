@@ -39,9 +39,10 @@ Three files written to --output-dir:
 
 The JSONL has the same fields as the spans parquet (idx, span_id,
 start, end, title, title_start, title_end, level, abs_level, span_chars,
-span_text). It is NOT zstd-compressed and contains the full span text
-uncapped — useful for direct inspection via `cat | jq`, but larger on
-disk than the parquet.
+span_text). It is NOT zstd-compressed. String fields longer than 4000
+chars are truncated to `<first 3000>[TRUNCATED]<last 1000>` so the file
+stays inspection-friendly via `cat | jq` / grep / head. The parquet is
+the source of truth for full content.
 
 Span fields
 -----------
@@ -137,6 +138,25 @@ def is_image_only(html: str) -> bool:
     visible = _TAG_STRIP.sub(" ", html)
     visible = re.sub(r"\s+", " ", visible).strip()
     return len(visible) < 200 and len(_IMG_TAG.findall(html)) >= 1
+
+
+# JSONL truncation: long fields get summarized for inspection-friendly output.
+# Parquet keeps the full text — this only affects the JSONL writer.
+_JSONL_TRUNCATE_THRESHOLD = 4000
+_JSONL_TRUNCATE_HEAD = 3000
+_JSONL_TRUNCATE_TAIL = 1000
+
+
+def _truncate_for_jsonl(value: Any) -> Any:
+    """If `value` is a string longer than the threshold, return
+    `<head>[TRUNCATED]<tail>`. Otherwise return the value unchanged."""
+    if not isinstance(value, str) or len(value) <= _JSONL_TRUNCATE_THRESHOLD:
+        return value
+    return (
+        value[:_JSONL_TRUNCATE_HEAD]
+        + "[TRUNCATED]"
+        + value[-_JSONL_TRUNCATE_TAIL:]
+    )
 
 
 def html_to_plain_text(html: str) -> str:
@@ -308,10 +328,15 @@ def main(
             for sp in spans:
                 sp["idx"] = idx
                 all_span_records.append(sp)
-                # Stream the JSONL line with idx ordered first for readability.
+                # Stream to JSONL with idx ordered first and long strings truncated
+                # for inspection-friendly output. Parquet stays uncapped.
                 jsonl_record = {
                     "idx": sp["idx"],
-                    **{k: v for k, v in sp.items() if k != "idx"},
+                    **{
+                        k: _truncate_for_jsonl(v)
+                        for k, v in sp.items()
+                        if k != "idx"
+                    },
                 }
                 spans_jsonl.write(
                     json.dumps(jsonl_record, ensure_ascii=False) + "\n"
@@ -365,7 +390,7 @@ def main(
     logger.info(f"wrote {spans_path}: {len(spans_df)} span rows")
     logger.info(
         f"wrote {spans_jsonl_path}: {len(all_span_records)} JSONL lines "
-        f"(streamed during parsing)"
+        f"(streamed during parsing; strings >{_JSONL_TRUNCATE_THRESHOLD} chars truncated)"
     )
 
     status_counts = Counter(d["parse_status"] for d in doc_records)

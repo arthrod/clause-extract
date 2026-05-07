@@ -21,12 +21,23 @@ the sibling script `parse_doc2dict_with_config.py`.
 
 Outputs
 -------
-Two parquet files in --output-dir:
+Three files written to --output-dir:
 
     parse_doc2dict_baseline_docs.parquet     One row per source document.
     parse_doc2dict_baseline_nodes.parquet    One row per SECTION node in every doc.
+    parse_doc2dict_baseline_nodes.jsonl      Line-delimited mirror of the
+                                             nodes parquet — same schema,
+                                             one section per line, `idx`
+                                             first. Streams during parsing
+                                             so a partial file remains
+                                             readable on crash.
 
-The nodes parquet contains FULL body text. Two columns:
+The parquet contains FULL body text (no caps). The JSONL truncates any
+string field longer than 4000 chars to `<first 3000>[TRUNCATED]<last 1000>`
+so the file stays inspection-friendly via `cat | jq` / grep / head. The
+parquet is the source of truth for full content.
+
+The nodes parquet has two body columns:
 
     body_direct      str   Concatenation of every text-leaf child directly
                            under this section, NOT recursing into child
@@ -101,6 +112,25 @@ def is_image_only(html: str) -> bool:
     visible = _TAG_STRIP.sub(" ", html)
     visible = re.sub(r"\s+", " ", visible).strip()
     return len(visible) < 200 and len(_IMG_TAG.findall(html)) >= 1
+
+
+# JSONL truncation: long fields get summarized for inspection-friendly output.
+# Parquet keeps the full text — this only affects the JSONL writer.
+_JSONL_TRUNCATE_THRESHOLD = 4000
+_JSONL_TRUNCATE_HEAD = 3000
+_JSONL_TRUNCATE_TAIL = 1000
+
+
+def _truncate_for_jsonl(value: Any) -> Any:
+    """If `value` is a string longer than the threshold, return
+    `<head>[TRUNCATED]<tail>`. Otherwise return the value unchanged."""
+    if not isinstance(value, str) or len(value) <= _JSONL_TRUNCATE_THRESHOLD:
+        return value
+    return (
+        value[:_JSONL_TRUNCATE_HEAD]
+        + "[TRUNCATED]"
+        + value[-_JSONL_TRUNCATE_TAIL:]
+    )
 
 
 def _is_section_node(d: Any) -> bool:
@@ -319,7 +349,13 @@ def main(
     doc_records: list[dict[str, Any]] = []
     all_section_records: list[dict[str, Any]] = []
 
-    with Progress(
+    # JSONL is written streamingly so a long-running corpus parse leaves a
+    # readable partial file even if it crashes mid-loop. Parquet still
+    # accumulates in memory and is written at the end (matches the existing
+    # pattern). String fields longer than _JSONL_TRUNCATE_THRESHOLD are
+    # truncated for the JSONL only — parquet keeps the full text.
+    nodes_jsonl_path = output_dir / "parse_doc2dict_baseline_nodes.jsonl"
+    with nodes_jsonl_path.open("w", encoding="utf-8") as nodes_jsonl, Progress(
         SpinnerColumn(),
         TextColumn("[bold cyan]doc2dict baseline[/bold cyan]"),
         BarColumn(),
@@ -345,6 +381,19 @@ def main(
             for s in sections:
                 s["idx"] = idx
                 all_section_records.append(s)
+                # Stream to JSONL with idx ordered first and long strings truncated
+                # for inspection-friendly output. Parquet stays uncapped.
+                jsonl_record = {
+                    "idx": s["idx"],
+                    **{
+                        k: _truncate_for_jsonl(v)
+                        for k, v in s.items()
+                        if k != "idx"
+                    },
+                }
+                nodes_jsonl.write(
+                    json.dumps(jsonl_record, ensure_ascii=False) + "\n"
+                )
 
             progress.update(
                 task,
@@ -393,6 +442,10 @@ def main(
     nodes_path = output_dir / "parse_doc2dict_baseline_nodes.parquet"
     nodes_df.write_parquet(nodes_path, compression="zstd")
     logger.info(f"wrote {nodes_path}: {len(nodes_df)} section rows")
+    logger.info(
+        f"wrote {nodes_jsonl_path}: {len(all_section_records)} JSONL lines "
+        f"(streamed during parsing; strings >{_JSONL_TRUNCATE_THRESHOLD} chars truncated)"
+    )
 
     status_counts = Counter(d["parse_status"] for d in doc_records)
     logger.info("=== status breakdown ===")

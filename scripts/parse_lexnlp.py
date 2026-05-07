@@ -13,75 +13,51 @@
 #     "lxml>=5.3",
 # ]
 # ///
-"""Baseline parser using lexnlp's regex section detector.
+"""Baseline parser using lexnlp's regex section detector — with span text.
 
-NO customization. NO custom hierarchy. NO inverted ordering. We call
-`section_spans_re` directly on the document's plain text and write out
-whatever lexnlp gives us.
+NO customization on lexnlp itself. We call `section_spans_re(plain_text)` and
+write what comes back, including the actual text content of each span.
 
-The vendored module is at `src/clause_extract/lexnlp_sections_regex.py`
-— a self-contained AGPLv3 port of the regex-only path of
-`lexnlp.nlp.en.segments.sections` from arthrod/lexpredict-lexnlp.
-The `SectionLevelParser.DEFAULT_SECTION_HIERARCHY` is used as-is — the
-order is lexnlp's original 10-K-shaped ordering (Section above Article in
-abs_level), which is what "no customization" means here.
-
-Inputs
-------
-The 1066-row corpus at `arthrod/new3_results_master22017_274.59mb`. Same
-extraction path as the doc2dict script — pull HTML out of the SEC SGML
-envelope, then convert HTML → plain text via BeautifulSoup with paragraph
-preservation (lexnlp's section detector relies on line boundaries).
+Why a paragraph-preserving HTML→text conversion is required (and is not
+"customization" of lexnlp): lexnlp's section regex matches against
+line-anchored patterns (`(?<=\\n)Section\\s+...`). If the HTML strip merges
+everything onto one line, lexnlp's detector reports near-zero sections.
+The plain-text extraction here uses BeautifulSoup with newline injection
+on block-level tags, then hands that text directly to lexnlp.
 
 Outputs
 -------
-Two parquet files written to --output-dir:
+Two parquet files in --output-dir:
 
-    parse_lexnlp_docs.parquet       One row per source document.
-        idx                  : int
-        company              : string
-        doc_type             : string
-        size_kb              : float
-        plain_text_kb        : float    Plain-text size (for the lex input).
-        parse_status         : string   ok | image_only | no_html_block | error.
-        parse_error          : string
-        elapsed_ms           : float
-        n_spans              : int      Total section spans lexnlp returned.
-        n_titled             : int      Spans with a parsed title.
-        max_abs_level        : int      Highest abs_level seen across spans.
-        max_rel_level        : int      Highest level (relative) seen.
-        abs_level_counts_json: string   JSON map of abs_level → count.
+    parse_lexnlp_docs.parquet     One row per source document.
+    parse_lexnlp_spans.parquet    One row per span, INCLUDING span_text.
 
-    parse_lexnlp_spans.parquet      One row per span across all docs.
-        idx                  : int
-        span_id              : int      Stable in-doc index (start-of-section order).
-        start                : int      Char offset in plain_text.
-        end                  : int
-        title                : string   The detected section title (or null).
-        title_start          : int
-        title_end            : int
-        level                : int      lexnlp's relative level (in-doc).
-        abs_level            : int      lexnlp's absolute hierarchy level
-                                        (1 = Appendix/Exhibit/Schedule/Part/Title,
-                                         3 = Section, 5 = Article, ...).
-        span_chars           : int      Length of the section's text.
+Span fields
+-----------
+    span_id      : int    In-doc index (start-of-section order).
+    start, end   : int    Char offsets in the doc's plain text.
+    title        : str    The detected section title (or null).
+    title_start, title_end : int
+    level        : int    lexnlp's relative level (in-doc).
+    abs_level    : int    lexnlp's absolute hierarchy level.
+                          1=Appendix/Exhibit/Schedule/Part/Title;
+                          3=Section; 4=Subsection; 5=Article;
+                          6=ALL-CAPS heading; 7=numeric fallback;
+                          8=alphabetic fallback; 9=parenthesized fallback.
+    span_chars   : int    Length of span_text in chars.
+    span_text    : str    The actual section content as lexnlp delimited it.
 
-Notes
------
-- The plain-text extraction uses a paragraph-preserving converter: every
-  block-level element ends in '\\n', so lexnlp's line-anchored regex can
-  find section boundaries. Tag-stripping with '<[^>]+>' alone destroys
-  paragraph boundaries and lex undercounts catastrophically.
-- We do NOT load lexnlp's ML section classifier (the sklearn pickle).
-  Per `docs/DECISIONS.md` §8, the regex-only path is what runs.
+Lexnlp returns spans, not a tree. They DO NOT nest — adjacent spans are
+literally adjacent slices of the plain-text string. So a "Section 5" span
+contains its (a)(b)(c) children's text inline, AND there are also separate
+spans for (a), (b), (c). This redundancy is built into lexnlp's output;
+we write what we get.
 
 Usage
 -----
+    uv run scripts/parse_lexnlp.py --limit 5
     HF_TOKEN=hf_xxx uv run scripts/parse_lexnlp.py \\
-        --output-dir data/runs/lexnlp_baseline \\
-        --limit 1066
-
-    HF_TOKEN=hf_xxx uv run scripts/parse_lexnlp.py --limit 5
+        --output-dir data/runs/lexnlp_baseline
 """
 from __future__ import annotations
 
@@ -106,7 +82,6 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-# Make the vendored lexnlp module importable without installing the package
 _REPO_SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_REPO_SRC) not in sys.path:
     sys.path.insert(0, str(_REPO_SRC))
@@ -123,8 +98,6 @@ _HTML_CLOSE = re.compile(r"</html\s*>", re.IGNORECASE)
 _IMG_TAG = re.compile(r"<img\b", re.IGNORECASE)
 _TAG_STRIP = re.compile(r"<[^>]+>")
 
-# Block-level tags whose end should produce a newline so that lex's
-# line-anchored regex can find section boundaries
 _BLOCK_TAGS = {
     "p", "div", "br", "hr",
     "h1", "h2", "h3", "h4", "h5", "h6",
@@ -141,54 +114,40 @@ def extract_html(raw: str) -> str | None:
     m_open = _HTML_OPEN.search(raw)
     if not m_open:
         return None
-    last_close = None
+    last = None
     for m in _HTML_CLOSE.finditer(raw):
-        last_close = m
-    if last_close is None:
+        last = m
+    if last is None:
         return None
-    return raw[m_open.start() : last_close.end()]
+    return raw[m_open.start() : last.end()]
 
 
 def is_image_only(html: str) -> bool:
     visible = _TAG_STRIP.sub(" ", html)
     visible = re.sub(r"\s+", " ", visible).strip()
-    n_imgs = len(_IMG_TAG.findall(html))
-    return len(visible) < 200 and n_imgs >= 1
+    return len(visible) < 200 and len(_IMG_TAG.findall(html)) >= 1
 
 
 def html_to_plain_text(html: str) -> str:
-    """Convert HTML to plain text preserving paragraph boundaries.
-
-    lexnlp's section detector matches against line-anchored patterns
-    (`(?<=\\n)Section\\s+...`), so paragraphs MUST end with newlines for
-    detection to work. A naive `<[^>]+>` strip merges everything into one
-    line and the detector reports near-zero sections.
-    """
+    """Paragraph-preserving HTML → text. Required for lexnlp's line-anchored
+    regex to find section boundaries."""
     soup = BeautifulSoup(html, "lxml")
-
-    # Strip script/style/meta noise
     for tag in soup(["script", "style", "noscript", "meta", "link"]):
         tag.decompose()
-
-    # Insert newlines after block-level tags (and before <br>)
     for tag in soup.find_all(_BLOCK_TAGS):
         if tag.name == "br":
             tag.replace_with("\n")
         else:
-            # Append a newline to the tag's tail
             tag.append("\n")
-
     text = soup.get_text(separator="")
-    # Normalize whitespace: collapse runs of non-newline whitespace, dedupe blank lines
     text = re.sub(r"[ \t\f\v]+", " ", text)
     text = re.sub(r"\n\s*\n+", "\n\n", text)
-    # Decode common HTML entities that bs4 sometimes leaves
     text = text.replace("\xa0", " ")
     return text.strip()
 
 
 def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Parse a single corpus row through the lexnlp regex section detector."""
+    """One corpus row → (summary, list_of_span_records)."""
     size_kb = round(len(raw) / 1024, 2)
     base: dict[str, Any] = {
         "idx": idx,
@@ -201,43 +160,45 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
         "n_titled": 0,
         "max_abs_level": 0,
         "max_rel_level": 0,
+        "total_span_chars": 0,
         "abs_level_counts_json": "{}",
     }
-    spans_out: list[dict[str, Any]] = []
 
     html = extract_html(raw)
     if html is None:
         base["parse_status"] = "no_html_block"
-        return base, spans_out
+        return base, []
     if is_image_only(html):
         base["parse_status"] = "image_only"
-        return base, spans_out
+        return base, []
 
     try:
         plain = html_to_plain_text(html)
     except Exception as e:
         base["parse_status"] = "error"
         base["parse_error"] = f"plain_text_extraction: {type(e).__name__}: {e}"
-        return base, spans_out
+        return base, []
     base["plain_text_kb"] = round(len(plain) / 1024, 2)
 
     t0 = time.perf_counter()
     try:
-        # NO customization — bare `section_spans_re` call. The function uses
-        # lexnlp's DEFAULT_SECTION_HIERARCHY internally with no overrides.
-        spans = list(section_spans_re(plain))
+        spans = list(section_spans_re(plain))  # ← lexnlp's defaults; no overrides
     except Exception as e:
         base["parse_status"] = "error"
         base["parse_error"] = f"section_spans_re: {type(e).__name__}: {e}"
         base["elapsed_ms"] = round((time.perf_counter() - t0) * 1000, 2)
-        return base, spans_out
+        return base, []
     elapsed = (time.perf_counter() - t0) * 1000
     base["elapsed_ms"] = round(elapsed, 2)
 
+    span_records: list[dict[str, Any]] = []
     abs_counter: Counter[int] = Counter()
+    total_chars = 0
     for span_id, sp in enumerate(spans):
         title = sp.title or None
-        spans_out.append({
+        # sp.text is the actual content slice — that's what we want in the parquet
+        span_text = sp.text if isinstance(sp.text, str) else plain[sp.start : sp.end]
+        span_records.append({
             "span_id": span_id,
             "start": sp.start,
             "end": sp.end,
@@ -246,26 +207,29 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
             "title_end": sp.title_end,
             "level": sp.level,
             "abs_level": sp.abs_level,
-            "span_chars": sp.end - sp.start,
+            "span_chars": len(span_text),
+            "span_text": span_text,
         })
         if title:
             base["n_titled"] += 1
         abs_counter[sp.abs_level] += 1
+        total_chars += len(span_text)
 
     base["parse_status"] = "ok"
     base["n_spans"] = len(spans)
     base["max_abs_level"] = max(abs_counter.keys(), default=0)
     base["max_rel_level"] = max((sp.level for sp in spans), default=0)
+    base["total_span_chars"] = total_chars
     base["abs_level_counts_json"] = json.dumps(
         {str(k): v for k, v in abs_counter.items()}
     )
-    return base, spans_out
+    return base, span_records
 
 
 def main(
     output_dir: Path = typer.Option(
         Path("data/runs/lexnlp_baseline"),
-        help="Where to write parse_lexnlp_docs.parquet and parse_lexnlp_spans.parquet.",
+        help="Where to write parse_lexnlp_{docs,spans}.parquet.",
     ),
     limit: int = typer.Option(0, help="Parse only the first N rows. 0 = all."),
     hf_token: str | None = typer.Option(
@@ -280,7 +244,9 @@ def main(
         if fallback.exists():
             hf_token = fallback.read_text().strip()
         else:
-            logger.error("Set HF_TOKEN env var or place a token at /home/claude/.hf_token")
+            logger.error(
+                "Set HF_TOKEN env var or place a token at /home/claude/.hf_token"
+            )
             raise typer.Exit(code=2)
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -332,12 +298,11 @@ def main(
                 advance=1,
                 description=(
                     f"idx={idx} {company[:24]:<24} "
-                    f"status={doc['parse_status']:<12} "
-                    f"spans={doc['n_spans']:>4} titled={doc['n_titled']:>4}"
+                    f"{doc['parse_status']:<12} "
+                    f"spans={doc['n_spans']:>4} body_kb={doc['total_span_chars']/1024:>6.1f}"
                 ),
             )
 
-    # Write outputs
     docs_df = pl.DataFrame(doc_records).select(
         pl.col("idx"),
         pl.col("company"),
@@ -351,6 +316,7 @@ def main(
         pl.col("n_titled"),
         pl.col("max_abs_level"),
         pl.col("max_rel_level"),
+        pl.col("total_span_chars"),
         pl.col("abs_level_counts_json"),
     )
     docs_path = output_dir / "parse_lexnlp_docs.parquet"
@@ -368,12 +334,12 @@ def main(
         pl.col("level"),
         pl.col("abs_level"),
         pl.col("span_chars"),
+        pl.col("span_text"),
     )
     spans_path = output_dir / "parse_lexnlp_spans.parquet"
     spans_df.write_parquet(spans_path, compression="zstd")
     logger.info(f"wrote {spans_path}: {len(spans_df)} span rows")
 
-    # Headline summary
     status_counts = Counter(d["parse_status"] for d in doc_records)
     logger.info("=== status breakdown ===")
     for s, n in status_counts.most_common():
@@ -381,14 +347,17 @@ def main(
 
     if status_counts.get("ok", 0):
         ok = [d for d in doc_records if d["parse_status"] == "ok"]
-        avg_spans = sum(d["n_spans"] for d in ok) / len(ok)
-        avg_titled = sum(d["n_titled"] for d in ok) / len(ok)
-        avg_abs = sum(d["max_abs_level"] for d in ok) / len(ok)
-        avg_rel = sum(d["max_rel_level"] for d in ok) / len(ok)
-        avg_ms = sum(d["elapsed_ms"] for d in ok) / len(ok)
+        n = len(ok)
+        avg_spans = sum(d["n_spans"] for d in ok) / n
+        avg_titled = sum(d["n_titled"] for d in ok) / n
+        avg_body = sum(d["total_span_chars"] for d in ok) / n / 1024
+        avg_abs = sum(d["max_abs_level"] for d in ok) / n
+        avg_rel = sum(d["max_rel_level"] for d in ok) / n
+        avg_ms = sum(d["elapsed_ms"] for d in ok) / n
         logger.info("=== ok-doc averages ===")
         logger.info(f"  avg spans:           {avg_spans:>7.1f}")
         logger.info(f"  avg titled spans:    {avg_titled:>7.1f}")
+        logger.info(f"  avg body kb (sum of span text): {avg_body:>7.1f}")
         logger.info(f"  avg max abs_level:   {avg_abs:>7.2f}")
         logger.info(f"  avg max rel level:   {avg_rel:>7.2f}")
         logger.info(f"  avg parse time (ms): {avg_ms:>7.1f}")

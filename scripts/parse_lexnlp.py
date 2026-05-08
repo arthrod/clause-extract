@@ -31,18 +31,29 @@ Three files written to --output-dir:
 
     parse_lexnlp_docs.parquet     One row per source document.
     parse_lexnlp_spans.parquet    One row per span, INCLUDING span_text.
-    parse_lexnlp_spans.jsonl      Line-delimited mirror of the spans
-                                  parquet — same content, one span per
-                                  line, `idx` first. Streams during
-                                  parsing so a partial file remains
-                                  readable on crash.
+    parse_lexnlp_spans.jsonl      ONE LINE PER PARSED UNIT, only 3 keys per line.
 
-The JSONL has the same fields as the spans parquet (idx, span_id,
-start, end, title, title_start, title_end, level, abs_level, span_chars,
-span_text). It is NOT zstd-compressed. String fields longer than 4000
-chars are truncated to `<first 3000>[TRUNCATED]<last 1000>` so the file
-stays inspection-friendly via `cat | jq` / grep / head. The parquet is
-the source of truth for full content.
+JSONL schema (the ONLY 3 keys per line)
+---------------------------------------
+    idx    int    Source corpus row index.
+    level  int    lexnlp's relative `level` (1-indexed; lex assigns level 1
+                  to the topmost heading hierarchy and increments downward).
+                  doc2dict uses 0-indexed `depth` instead — not normalized
+                  so each parser's view is preserved.
+    span   str    The span's full text (lexnlp's `span_text`, which already
+                  includes the heading inline because lex captures the
+                  section break and the following content as one slice).
+                  Strings longer than 4000 chars truncated to
+                  `<head 3000>[TRUNCATED]<tail 1000>`.
+
+Concatenating all `span` values for one `idx` in span_id order should
+reconstruct the document's plain text — by lexnlp's design, every char of
+the input belongs to exactly one span. Compare against the matching
+reconstruction from doc2dict to find places where each parser is missing
+or duplicating content.
+
+The parquet contains FULL span text and ALL fields. The JSONL is the
+inspection-ready shape; parquet is the source of truth.
 
 Span fields
 -----------
@@ -328,15 +339,15 @@ def main(
             for sp in spans:
                 sp["idx"] = idx
                 all_span_records.append(sp)
-                # Stream to JSONL with idx ordered first and long strings truncated
-                # for inspection-friendly output. Parquet stays uncapped.
+                # Build the 3-key JSONL record. Skip records whose span_text
+                # is empty (rare but possible at doc boundaries).
+                span = sp.get("span_text") or ""
+                if not span:
+                    continue
                 jsonl_record = {
                     "idx": sp["idx"],
-                    **{
-                        k: _truncate_for_jsonl(v)
-                        for k, v in sp.items()
-                        if k != "idx"
-                    },
+                    "level": sp["level"],
+                    "span": _truncate_for_jsonl(span),
                 }
                 spans_jsonl.write(
                     json.dumps(jsonl_record, ensure_ascii=False) + "\n"

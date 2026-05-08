@@ -33,22 +33,29 @@ Three files written to --output-dir:
 
     parse_doc2dict_with_config_docs.parquet     One row per source document.
     parse_doc2dict_with_config_nodes.parquet    One row per section node.
-    parse_doc2dict_with_config_nodes.jsonl      Line-delimited mirror of
-                                                the nodes parquet — same
-                                                content, one section per
-                                                line, `idx` first. Streams
-                                                during parsing so a partial
-                                                file remains readable on
-                                                crash.
+    parse_doc2dict_with_config_nodes.jsonl      ONE LINE PER PARSED UNIT,
+                                                only 3 keys per line.
 
-The JSONL has the same fields as the nodes parquet (idx, node_id,
-parent_node_id, depth, doc2dict_section_key, cls, title,
-standardized_title, n_direct_section_children, body_direct_chars,
-body_recursive_chars, body_direct, body_recursive). It is NOT
-zstd-compressed. String fields longer than 4000 chars are truncated to
-`<first 3000>[TRUNCATED]<last 1000>` so the file stays inspection-friendly
-via `cat | jq` / grep / head. The parquet is the source of truth for
-full content.
+JSONL schema (the ONLY 3 keys per line)
+---------------------------------------
+    idx    int    Source corpus row index.
+    level  int    doc2dict tree depth (0 = top of document body, increases
+                  going down). doc2dict's NATIVE 0-indexed depth; lexnlp
+                  uses 1-indexed `level` instead — not normalized so each
+                  parser's view is preserved.
+    span   str    The parsed unit's content: heading + body. Specifically
+                  `<title>\n<body_direct>` for normal sections; just
+                  `<body_direct>` for doc2dict's synthetic `introduction`
+                  pseudo-node. Strings longer than 4000 chars truncated to
+                  `<head 3000>[TRUNCATED]<tail 1000>`.
+
+Concatenating all `span` values for one `idx` in document order should
+approximately reconstruct the agreement text. Compare against the
+matching reconstruction from the other two parsers (baseline + lexnlp)
+to find places where each parser is missing or duplicating content.
+
+The parquet contains FULL body text and ALL fields. The JSONL is the
+inspection-ready shape; parquet is the source of truth.
 
 Body extraction
 ---------------
@@ -137,6 +144,26 @@ def _truncate_for_jsonl(value: Any) -> Any:
         + "[TRUNCATED]"
         + value[-_JSONL_TRUNCATE_TAIL:]
     )
+
+
+def _build_jsonl_span(
+    title: str | None, body_direct: str | None, cls: str | None
+) -> str:
+    """Combine a section's heading and direct body into the JSONL `span`.
+
+    For doc2dict's synthetic `introduction` pseudo-node, emit only
+    `body_direct`. The literal word "introduction" is a doc2dict class
+    label, not document content; including it would pollute reconstruction.
+
+    For all other sections, concatenate `<title>\\n<body_direct>`,
+    skipping either part if it's empty.
+    """
+    body = body_direct or ""
+    if cls == "introduction":
+        return body
+    title = title or ""
+    parts = [p for p in (title, body) if p]
+    return "\n".join(parts)
 
 
 def _is_section_node(d: Any) -> bool:
@@ -367,15 +394,17 @@ def main(
             for s in sections:
                 s["idx"] = idx
                 all_section_records.append(s)
-                # Stream to JSONL with idx ordered first and long strings truncated
-                # for inspection-friendly output. Parquet stays uncapped.
+                # Build the 3-key JSONL record. Skip records whose span
+                # collapses to empty (no title, no body).
+                span = _build_jsonl_span(
+                    s.get("title"), s.get("body_direct"), s.get("cls")
+                )
+                if not span:
+                    continue
                 jsonl_record = {
                     "idx": s["idx"],
-                    **{
-                        k: _truncate_for_jsonl(v)
-                        for k, v in s.items()
-                        if k != "idx"
-                    },
+                    "level": s["depth"],
+                    "span": _truncate_for_jsonl(span),
                 }
                 nodes_jsonl.write(
                     json.dumps(jsonl_record, ensure_ascii=False) + "\n"

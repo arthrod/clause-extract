@@ -350,6 +350,17 @@ def main(
         help="Where to write parse_doc2dict_baseline_{docs,nodes}.parquet.",
     ),
     limit: int = typer.Option(0, help="Parse only the first N rows. 0 = all."),
+    no_truncate: bool = typer.Option(
+        False,
+        "--no-truncate",
+        help=(
+            "Disable JSONL truncation. By default, strings longer than "
+            f"{_JSONL_TRUNCATE_THRESHOLD} chars are summarized to "
+            f"<head {_JSONL_TRUNCATE_HEAD}>[TRUNCATED]<tail {_JSONL_TRUNCATE_TAIL}>. "
+            "With this flag, JSONL spans are written full-length — useful "
+            "when the JSONL feeds reconstruction-quality measurement."
+        ),
+    ),
     hf_token: str | None = typer.Option(
         None,
         envvar="HF_TOKEN",
@@ -427,7 +438,7 @@ def main(
                 jsonl_record = {
                     "idx": s["idx"],
                     "level": s["depth"],
-                    "span": _truncate_for_jsonl(span),
+                    "span": span if no_truncate else _truncate_for_jsonl(span),
                 }
                 nodes_jsonl.write(
                     json.dumps(jsonl_record, ensure_ascii=False) + "\n"
@@ -480,9 +491,14 @@ def main(
     nodes_path = output_dir / "parse_doc2dict_baseline_nodes.parquet"
     nodes_df.write_parquet(nodes_path, compression="zstd")
     logger.info(f"wrote {nodes_path}: {len(nodes_df)} section rows")
+    truncation_note = (
+        "no truncation (--no-truncate)"
+        if no_truncate
+        else f"strings >{_JSONL_TRUNCATE_THRESHOLD} chars truncated"
+    )
     logger.info(
         f"wrote {nodes_jsonl_path}: {len(all_section_records)} JSONL lines "
-        f"(streamed during parsing; strings >{_JSONL_TRUNCATE_THRESHOLD} chars truncated)"
+        f"(streamed during parsing; {truncation_note})"
     )
 
     status_counts = Counter(d["parse_status"] for d in doc_records)

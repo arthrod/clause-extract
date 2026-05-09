@@ -216,19 +216,6 @@ def _is_text_leaf(d: Any) -> bool:
     return isinstance(d, dict) and "text" in d and "contents" not in d
 
 
-def _collect_table_text(node: dict[str, Any]) -> str:
-    """Extract combined preamble + postamble text from a node's ``table`` key."""
-    table = node.get("table")
-    if not isinstance(table, dict):
-        return ""
-    parts: list[str] = []
-    for key in ("preamble", "postamble"):
-        t = table.get(key)
-        if isinstance(t, str) and t.strip():
-            parts.append(t.strip())
-    return "\n".join(parts)
-
-
 def _collect_direct_text(section: dict[str, Any]) -> str:
     out: list[str] = []
     contents = section.get("contents")
@@ -594,95 +581,6 @@ def _promote_text_leaves(
             "_body_text": body or "",
             "_full_text": text,
         }))
-    return promoted
-
-
-def _promote_text_blob(
-    text: str,
-    key_prefix: str,
-) -> list[tuple[str, dict[str, Any]]]:
-    """Split a single text blob on section markers, return virtual nodes.
-
-    The portion of *text* before the first section marker (the preamble)
-    is returned as a special entry with ``_preamble`` set to ``True`` so
-    the caller can route it as body-direct instead of a standalone row.
-
-    Only matches section markers that begin a logical segment —
-    preceded by start-of-string, ``\\n``, ``.  ``, or ``:  ``.
-    This avoids false positives like ``(d)`` inside body text
-    (e.g. "described in Section 3(d) of this Agreement").
-    """
-    if not text or not text.strip():
-        return []
-    _MARKER_RE = re.compile(
-        r"(?:(?:^|(?<=[.:\"'\u201d)]))\s+|(?<=\s)|^)"
-        r"((?:\d+\.(?:\s|[A-Z])|\([a-z]\)(?:\s|[A-Z])|\([ivx]+\)(?:\s|[A-Za-z])|\([A-Z]\)(?:\s|[a-z])|\(\d+\)(?:\s|[A-Z])))"
-    )
-    markers = [(m.start(1), m.end(1)) for m in _MARKER_RE.finditer(text)]
-    if not markers:
-        return []
-
-    promoted: list[tuple[str, dict[str, Any]]] = []
-
-    for idx, (mk_start, mk_end) in enumerate(markers):
-        next_mk_start = markers[idx + 1][0] if idx + 1 < len(markers) else len(text)
-        chunk = text[mk_start:next_mk_start].strip()
-        if not chunk:
-            continue
-
-        # Split heading from body: first "sentence" up to ". " / ".\n" is heading
-        # If no period found, first line is heading
-        # heading_match looks for the marker + text up to a period+space boundary
-        hm = re.match(
-            r"^((?:\d+\.(?:\s|[A-Z])|\([a-z]\)(?:\s|[A-Z])|\([ivx]+\)(?:\s|[A-Za-z])|\([A-Z]\)(?:\s|[a-z])|\(\d+\)(?:\s|[A-Z]))"
-            r"[^.]*?)(?:\.\s|\.\n|\.\xa0)",
-            chunk,
-        )
-        if hm:
-            heading = hm.group(1).strip().rstrip(".")
-            body = chunk[hm.end():].strip()
-        elif len(chunk) > 80:
-            _TITLE_SPLIT = re.match(
-                r"^((?:\d+\.(?:\s|[A-Z])|\([a-z]\)(?:\s|[A-Z])|\([ivx]+\)(?:\s|[A-Za-z])|\([A-Z]\)(?:\s|[a-z])|\(\d+\)(?:\s|[A-Z]))"
-                r".*?)"
-                r"(?:\s+[A-Z][a-z]+)?"
-                r"\s+(?=(?:[a-z]+\s+){1,}[a-z]+)",
-                chunk,
-            )
-            if _TITLE_SPLIT:
-                heading = _TITLE_SPLIT.group(1).strip()
-                body = chunk[_TITLE_SPLIT.end():].strip()
-            else:
-                lines = chunk.split("\n", 1)
-                heading = lines[0][:80].strip()
-                body = lines[0][80:].strip() if len(lines[0]) > 80 else ""
-                if len(lines) > 1:
-                    body = (body + "\n" + lines[1]).strip() if body else lines[1].strip()
-        else:
-            lines = chunk.split("\n", 1)
-            heading = lines[0].strip()
-            body = lines[1].strip() if len(lines) > 1 else ""
-
-        promoted.append((f"{key_prefix}_t{idx}", {
-            "title": heading,
-            "class": "promoted table text",
-            "contents": {},
-            "_body_text": body or "",
-            "_full_text": chunk,
-        }))
-
-    first_mk_start = markers[0][0]
-    preamble_text = text[:first_mk_start].strip()
-    if preamble_text:
-        promoted.insert(0, (f"{key_prefix}_pre", {
-            "title": "",
-            "class": "table preamble",
-            "contents": {},
-            "_body_text": preamble_text,
-            "_full_text": preamble_text,
-            "_preamble": True,
-        }))
-
     return promoted
 
 

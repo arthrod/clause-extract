@@ -21,6 +21,18 @@ DATA_DIR="$(cd "$REPO_ROOT" && pwd)/data/auto_parse"
 LOG_DIR="$DATA_DIR/level_freeze/turns"
 mkdir -p "$LOG_DIR"
 
+# Sanity gate: REPO_ROOT must contain the parser the dispatch is about to
+# tune. Earlier turns silently dispatched into a now-deleted nested
+# `clause-extract/clause-extract/` submodule path that opencode had cached
+# in ~/.local/share/opencode/opencode.db; the agent loaded into an empty
+# directory and exited confused. Fail loudly here instead.
+PARSER="$REPO_ROOT/scripts/parse_doc2dict_with_config.py"
+if [[ ! -f "$PARSER" ]]; then
+  echo "ERROR: parser not found at $PARSER — REPO_ROOT looks wrong." >&2
+  echo "REPO_ROOT=$REPO_ROOT" >&2
+  exit 2
+fi
+
 STATE="$DATA_DIR/level_freeze/state.json"
 CUR_IDX="$(uv run --quiet python -c "import json; print(json.load(open('$STATE'))['current_idx'])")"
 
@@ -51,7 +63,15 @@ echo "dispatching to opencode (log: $log_file)..."
 # permission model would prompt on every tool call, which can't work in a
 # headless turn. The agent only has filesystem + bash access in the repo,
 # which is the same surface a human running this script would have.
+#
+# `--dir "$REPO_ROOT"` forces opencode's working directory to the repo
+# root regardless of any stale project pointer in `.git/opencode` or
+# ~/.local/share/opencode/opencode.db (the project row's `worktree`
+# column). Without this, opencode resolves cwd from the cached project
+# entry which can lag a repo move and dispatch the agent into a ghost
+# path. See the May 9 idx=14 attempt 2 failure for the original incident.
 opencode run \
+  --dir "$REPO_ROOT" \
   "${model_arg[@]}" \
   --dangerously-skip-permissions \
   --print-logs \

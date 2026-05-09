@@ -358,18 +358,18 @@ The loop is INCREMENTAL — keep changes targeted:
 ## Workflow for THIS dispatch
 
 1. Read the source-of-truth and the current output above. Decide which
-   minimal edit to `clause-extract/scripts/parse_doc2dict_with_config.py`
-   or `clause-extract/src/clause_extract/agreement_config.py` makes the
+   minimal edit to `scripts/parse_doc2dict_with_config.py`
+   or `src/clause_extract/agreement_config.py` makes the
    levels for idx={current_idx} match the rubric.
 
 2. Make the edit. Keep it minimal — adding/tightening one regex,
    reshaping the per-level pattern list. Do NOT refactor unrelated code.
 
-3. Re-run the parser on idx={current_idx}. The `--output-dir` MUST be the
-   ABSOLUTE path `{data_dir_abs}` — that is the canonical directory the
-   freeze and regress scripts read. Using a relative path will write
-   somewhere else (the repo has nested `clause-extract/clause-extract/`)
-   and the freeze will silently capture stale output.
+3. Re-run the parser on idx={current_idx}. Run from REPO_ROOT
+   ({repo_dir_abs}) and pass the ABSOLUTE `--output-dir` so the canonical
+   jsonl gets updated. `freeze.py` and `regress.py` read from
+   `{data_dir_abs}/parse_doc2dict_with_config_nodes.jsonl`; if the parser
+   writes elsewhere, the freeze will silently capture stale output.
 
      cd {repo_dir_abs} && \\
        uv run scripts/parse_doc2dict_with_config.py \\
@@ -378,12 +378,19 @@ The loop is INCREMENTAL — keep changes targeted:
          --no-truncate
 
    `--limit {limit_n}` parses idxs 0..{current_idx} inclusive. `--no-truncate`
-   keeps full spans so the freeze captures real text. Confirm the parser
-   wrote to {data_dir_abs}/parse_doc2dict_with_config_nodes.jsonl by
-   checking its mtime is recent — `ls -la` it before freezing.
+   keeps full spans so the freeze captures real text.
 
-4. **Run the regression check FIRST**, before doing anything else with
-   the new output:
+4. **Sanity check the parser actually emitted records for idx={current_idx}.**
+   This catches the failure mode where an over-aggressive edit silently
+   drops the target idx from the output — the freeze would then say "no
+   records for idx={current_idx}" and the dispatch would burn an attempt.
+
+     ls -la {data_dir_abs}/parse_doc2dict_with_config_nodes.jsonl
+     # mtime should be <60s old
+     grep -c '"idx": {current_idx}' {data_dir_abs}/parse_doc2dict_with_config_nodes.jsonl
+     # count must be > 0; if 0, your edit broke parsing for this idx — revert and try smaller
+
+5. **Run the regression check** before freezing:
 
      uv run scripts/level_loop/regress.py
 
@@ -391,12 +398,12 @@ The loop is INCREMENTAL — keep changes targeted:
    step 2 with a SMALLER, MORE TARGETED change. Do not proceed to
    freeze with a regressed parser — that just wastes attempts.
 
-5. Inspect the output for idx={current_idx} in
-   `data/auto_parse/parse_doc2dict_with_config_nodes.jsonl`. Verify the
+6. Inspect the output for idx={current_idx} in
+   `{data_dir_abs}/parse_doc2dict_with_config_nodes.jsonl`. Verify the
    levels match the rubric: exactly one level-0, no levels > 7 unless
    the document has 3+ subdocs, no SEC-filing boilerplate captured.
 
-6. If correct, freeze:
+7. If correct, freeze:
 
      uv run scripts/level_loop/freeze.py {current_idx}
 
@@ -414,14 +421,14 @@ The loop is INCREMENTAL — keep changes targeted:
    shape), re-run the parser, and try freeze again WITHIN this
    dispatch. Do NOT pass --force.
 
-7. Advance to the next idx — EXACTLY ONCE:
+8. Advance to the next idx — EXACTLY ONCE:
 
      uv run scripts/level_loop/advance.py
 
    `advance.py` runs regress.py as a gate; it refuses if any frozen
    idx fails. Do not call advance with --skip-regress.
 
-8. **STOP IMMEDIATELY AFTER ONE SUCCESSFUL ADVANCE.** Print a single
+9. **STOP IMMEDIATELY AFTER ONE SUCCESSFUL ADVANCE.** Print a single
    one-line summary of what changed for idx={current_idx} and EXIT.
    DO NOT continue with idx={current_idx}+1. The driver dispatches a
    fresh opencode session for each idx; your job is exactly ONE idx.

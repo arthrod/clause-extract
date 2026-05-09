@@ -134,8 +134,10 @@ _LEVEL_PATTERNS: list[tuple[int, re.Pattern[str]]] = [
     (3, re.compile(r"^\(([a-z])\)")),
     # Level 2: bare number with period ("1.", "10.", "21.")
     (2, re.compile(r"^(\d+)\.")),
-    # Level 2: ARTICLE heading ("ARTICLE I", "ARTICLE 3", "Article IV.")
-    (2, re.compile(r"^ARTICLE\s+(\d+|[IVXLCDM]+)\.?\s*$", re.IGNORECASE)),
+    # Level 2: ARTICLE heading ("ARTICLE I", "ARTICLE 3", "Article IV.",
+    # "ARTICLE I. DEFINITIONS"). Unanchored to match parity with the SECTION
+    # rule below, so titles with inline descriptions match too.
+    (2, re.compile(r"^ARTICLE\s+(\d+|[IVXLCDM]+)", re.IGNORECASE)),
     # Level 2: SECTION heading ("SECTION 1.", "Section 2.3")
     (2, re.compile(r"^SECTION\s+\d+", re.IGNORECASE)),
 ]

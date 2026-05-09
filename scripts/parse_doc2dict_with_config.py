@@ -695,6 +695,8 @@ def walk_sections(
     counter: list[int] | None = None,
     subdoc_penalty: int = 0,
     envelope_seen: list[bool] | None = None,
+    l0_seen: list[bool] | None = None,
+    parent_is_envelope: bool = False,
 ) -> list[dict[str, Any]]:
     """Walk doc2dict's section tree and emit flat row records.
 
@@ -715,6 +717,8 @@ def walk_sections(
         counter = [0]
     if envelope_seen is None:
         envelope_seen = [False]
+    if l0_seen is None:
+        l0_seen = [False]
     rows: list[dict[str, Any]] = []
     if not isinstance(container, dict):
         return rows
@@ -768,6 +772,15 @@ def walk_sections(
                         break
             if not is_agreement_root:
                 remapped = 1
+
+        is_secondary_agreement = False
+        if subdoc_penalty == 0 and not is_envelope:
+            if remapped == 0 and l0_seen[0]:
+                remapped = 1
+                is_secondary_agreement = True
+            if remapped == 0:
+                l0_seen[0] = True
+
         effective = remapped + subdoc_penalty
         effective = min(effective, 4 + subdoc_penalty)
         rows.append(
@@ -791,7 +804,7 @@ def walk_sections(
         # Penalty bumps for descendants only when this section is a REAL
         # subdocument (subdoc class AND not the envelope).
         child_penalty = subdoc_penalty + (
-            1 if ((cls or "") in _SUBDOC_CLASSES and not is_envelope) else 0
+            1 if ((cls or "") in _SUBDOC_CLASSES and not is_envelope) or (is_secondary_agreement and not parent_is_envelope) else 0
         )
         if isinstance(contents, dict):
             child_sections = {k: v for k, v in contents.items() if _is_section_node(v)}
@@ -805,6 +818,7 @@ def walk_sections(
                         counter=counter,
                         subdoc_penalty=child_penalty,
                         envelope_seen=envelope_seen,
+                        l0_seen=l0_seen,
                     )
                 )
             promoted = _promote_text_leaves(contents)
@@ -816,7 +830,7 @@ def walk_sections(
                 prom_body = prom_node.get("_body_text", "")
                 prom_full = prom_node.get("_full_text", prom_body)
                 prom_remapped = _remap_depth(prom_title, prom_cls, depth + 1, parent_level=effective)
-                prom_penalty = subdoc_penalty
+                prom_penalty = child_penalty if is_secondary_agreement else subdoc_penalty
                 rows.append(
                     {
                         "node_id": prom_id,
@@ -845,13 +859,13 @@ _AGREEMENT_CONFIG = make_agreement_config()
 
 
 def _fix_post_signature_envelope(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Fix envelope nodes that appear after agreement content.
+    """Un-mark envelope nodes that appear after agreement body content.
 
     doc2dict sometimes strips the EXHIBIT tag from the HTML, so walk_sections
     never detects the real envelope and misidentifies the first post-content
-    annex as the SEC envelope. Heuristic: if an envelope node shares a parent
-    with section/article siblings that appear BEFORE it, the envelope is really
-    a post-agreement attachment — un-mark it and bump descendant penalties.
+    annex as the SEC envelope. If an envelope node shares a parent with
+    section/article siblings that appear BEFORE it, the envelope is really a
+    post-agreement attachment.
     """
     envelope_rows = [r for r in rows if r.get("is_envelope")]
     if not envelope_rows:

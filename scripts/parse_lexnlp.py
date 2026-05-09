@@ -82,6 +82,7 @@ Usage
     HF_TOKEN=hf_xxx uv run scripts/parse_lexnlp.py \\
         --output-dir data/runs/lexnlp_baseline
 """
+
 from __future__ import annotations
 
 import json
@@ -112,8 +113,7 @@ if str(_REPO_SRC) not in sys.path:
 from clause_extract.lexnlp_sections_regex import section_spans_re  # noqa: E402
 
 CORPUS_URL = (
-    "hf://datasets/arthrod/new3_results_master22017_274.59mb"
-    "/data/train-00000-of-00001.parquet"
+    "hf://datasets/arthrod/new3_results_master22017_274.59mb/data/train-00000-of-00001.parquet"
 )
 
 _HTML_OPEN = re.compile(r"<html[\s>]", re.IGNORECASE)
@@ -122,13 +122,33 @@ _IMG_TAG = re.compile(r"<img\b", re.IGNORECASE)
 _TAG_STRIP = re.compile(r"<[^>]+>")
 
 _BLOCK_TAGS = {
-    "p", "div", "br", "hr",
-    "h1", "h2", "h3", "h4", "h5", "h6",
-    "li", "ul", "ol",
-    "tr", "td", "th",
-    "table", "thead", "tbody", "tfoot",
-    "section", "article", "header", "footer", "aside",
-    "blockquote", "pre",
+    "p",
+    "div",
+    "br",
+    "hr",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "li",
+    "ul",
+    "ol",
+    "tr",
+    "td",
+    "th",
+    "table",
+    "thead",
+    "tbody",
+    "tfoot",
+    "section",
+    "article",
+    "header",
+    "footer",
+    "aside",
+    "blockquote",
+    "pre",
     "address",
 }
 
@@ -153,9 +173,9 @@ def is_image_only(html: str) -> bool:
 
 # JSONL truncation: long fields get summarized for inspection-friendly output.
 # Parquet keeps the full text — this only affects the JSONL writer.
-_JSONL_TRUNCATE_THRESHOLD = 4000
-_JSONL_TRUNCATE_HEAD = 3000
-_JSONL_TRUNCATE_TAIL = 1000
+_JSONL_TRUNCATE_THRESHOLD = 1000
+_JSONL_TRUNCATE_HEAD = 800
+_JSONL_TRUNCATE_TAIL = 200
 
 
 def _truncate_for_jsonl(value: Any) -> Any:
@@ -163,11 +183,7 @@ def _truncate_for_jsonl(value: Any) -> Any:
     `<head>[TRUNCATED]<tail>`. Otherwise return the value unchanged."""
     if not isinstance(value, str) or len(value) <= _JSONL_TRUNCATE_THRESHOLD:
         return value
-    return (
-        value[:_JSONL_TRUNCATE_HEAD]
-        + "[TRUNCATED]"
-        + value[-_JSONL_TRUNCATE_TAIL:]
-    )
+    return value[:_JSONL_TRUNCATE_HEAD] + "[TRUNCATED]" + value[-_JSONL_TRUNCATE_TAIL:]
 
 
 def html_to_plain_text(html: str) -> str:
@@ -240,18 +256,20 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
         title = sp.title or None
         # sp.text is the actual content slice — that's what we want in the parquet
         span_text = sp.text if isinstance(sp.text, str) else plain[sp.start : sp.end]
-        span_records.append({
-            "span_id": span_id,
-            "start": sp.start,
-            "end": sp.end,
-            "title": title,
-            "title_start": sp.title_start,
-            "title_end": sp.title_end,
-            "level": sp.level,
-            "abs_level": sp.abs_level,
-            "span_chars": len(span_text),
-            "span_text": span_text,
-        })
+        span_records.append(
+            {
+                "span_id": span_id,
+                "start": sp.start,
+                "end": sp.end,
+                "title": title,
+                "title_start": sp.title_start,
+                "title_end": sp.title_end,
+                "level": sp.level,
+                "abs_level": sp.abs_level,
+                "span_chars": len(span_text),
+                "span_text": span_text,
+            }
+        )
         if title:
             base["n_titled"] += 1
         abs_counter[sp.abs_level] += 1
@@ -262,9 +280,7 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
     base["max_abs_level"] = max(abs_counter.keys(), default=0)
     base["max_rel_level"] = max((sp.level for sp in spans), default=0)
     base["total_span_chars"] = total_chars
-    base["abs_level_counts_json"] = json.dumps(
-        {str(k): v for k, v in abs_counter.items()}
-    )
+    base["abs_level_counts_json"] = json.dumps({str(k): v for k, v in abs_counter.items()})
     return base, span_records
 
 
@@ -297,9 +313,7 @@ def main(
         if fallback.exists():
             hf_token = fallback.read_text().strip()
         else:
-            logger.error(
-                "Set HF_TOKEN env var or place a token at /home/claude/.hf_token"
-            )
+            logger.error("Set HF_TOKEN env var or place a token at /home/claude/.hf_token")
             raise typer.Exit(code=2)
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -324,16 +338,19 @@ def main(
     # accumulates in memory and is written at the end (matches the existing
     # pattern; switching parquet to streaming would need a different writer).
     spans_jsonl_path = output_dir / "parse_lexnlp_spans.jsonl"
-    with spans_jsonl_path.open("w", encoding="utf-8") as spans_jsonl, Progress(
-        SpinnerColumn(),
-        TextColumn("[bold magenta]lexnlp baseline[/bold magenta]"),
-        BarColumn(),
-        TextColumn("{task.completed}/{task.total}"),
-        TimeElapsedColumn(),
-        TimeRemainingColumn(),
-        TextColumn("{task.description}"),
-        transient=False,
-    ) as progress:
+    with (
+        spans_jsonl_path.open("w", encoding="utf-8") as spans_jsonl,
+        Progress(
+            SpinnerColumn(),
+            TextColumn("[bold magenta]lexnlp baseline[/bold magenta]"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+            TextColumn("{task.description}"),
+            transient=False,
+        ) as progress,
+    ):
         task = progress.add_task("starting...", total=len(df))
         for row in df.iter_rows(named=True):
             idx = int(row["idx"])
@@ -360,9 +377,7 @@ def main(
                     "level": sp["level"],
                     "span": span if no_truncate else _truncate_for_jsonl(span),
                 }
-                spans_jsonl.write(
-                    json.dumps(jsonl_record, ensure_ascii=False) + "\n"
-                )
+                spans_jsonl.write(json.dumps(jsonl_record, ensure_ascii=False) + "\n")
 
             progress.update(
                 task,
@@ -370,7 +385,7 @@ def main(
                 description=(
                     f"idx={idx} {company[:24]:<24} "
                     f"{doc['parse_status']:<12} "
-                    f"spans={doc['n_spans']:>4} body_kb={doc['total_span_chars']/1024:>6.1f}"
+                    f"spans={doc['n_spans']:>4} body_kb={doc['total_span_chars'] / 1024:>6.1f}"
                 ),
             )
 

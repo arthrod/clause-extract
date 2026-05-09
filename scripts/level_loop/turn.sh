@@ -72,7 +72,7 @@ echo "dispatching to opencode (log: $log_file)..."
 # path. See the May 9 idx=14 attempt 2 failure for the original incident.
 opencode run \
   --dir "$REPO_ROOT" \
-  "${model_arg[@]}" \
+  ${model_arg[@]+"${model_arg[@]}"} \
   --dangerously-skip-permissions \
   --print-logs \
   --log-level INFO \

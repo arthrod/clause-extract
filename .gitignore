@@ -61,3 +61,4 @@ data/local/
 # --- Build artifacts ---
 *.log
 *.tmp
+data/auto_parse/parse_doc2dict_with_config_nodes.jsonl

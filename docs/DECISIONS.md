@@ -266,3 +266,34 @@ In the 10-doc pilot, 2 of 10 (rows 178, 563) were image-only. Estimated corpus-w
 ### What would change our mind
 
 - If image-only rate exceeds 30% at full corpus scale, the bias from exclusion may be too large. We'd add OCR upstream as a separate preprocessing step (not in this repo's scope).
+
+---
+
+## §10 — Reconstruction-quality bar is the parser's success criterion
+
+### Decision
+
+Every parser ships when `measure_reconstruction.py` reports:
+
+- **Mean word coverage ≥ 95%** across all ok-status docs.
+- **No doc below 80%** word coverage.
+- Both numbers measured with truncation off (`--no-truncate`).
+
+Below the bar, the parser is broken; ship-blocking. Other validation gates (canonical-ID round-trip, subdoc-detector precision/recall, end-to-end determinism) are necessary but downstream of this one — a parser that doesn't reconstruct the source can't feed any downstream stage honestly.
+
+### Why these specific numbers
+
+- **95% mean** is the threshold where the residual gap is plausibly noise (whitespace at section boundaries, paragraph rejoining edge cases) rather than systematic content loss. Below 95%, there's almost always a structural pattern the parser is dropping (tables, mixed-content children, footers, etc.).
+- **80% per-doc floor** prevents masking failures. A parser at 95% mean could hide a long tail of docs at 30–40% if there's no per-doc floor; the 80% floor forces those outliers to surface.
+- **Truncation off** because the JSONL truncation we use for inspection (`<head 3000>[TRUNCATED]<tail 1000>` for strings >4000 chars) artificially lowers the metric for docs with long sections. The bar is about real parser fidelity, not inspection-format compactness.
+
+### Alternatives considered
+
+- **char_ratio_pct as primary metric**: rejected because it conflates content loss with word repetition. A parser that emits the same heading three times has high char ratio but no extra information.
+- **rapidfuzz WRatio**: rejected because it doesn't tell you what's missing — only that the strings differ. word_coverage with `n_missing_words` is more debuggable.
+- **80% bar instead of 95%**: rejected. lex already reaches 97-98% on smoke tests; lowering the bar to 80% gives doc2dict an excuse to leak 20% of content unaddressed.
+- **No per-doc floor**: rejected per the masking argument above.
+
+### What would change our mind
+
+- If a corpus-scale run shows a hard ceiling below 95% for both parsers due to source HTML pathologies (e.g., non-textual content like CAD drawings embedded as raster images that's *intended* to be in the agreement), we'd revise downward and document the corpus characteristic. Need actual measurement to make that call.

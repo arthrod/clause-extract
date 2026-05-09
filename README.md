@@ -11,35 +11,54 @@ tags:
 ---
 # clause-extract
 
-End-to-end parser for SEC EX-10 exhibit agreements. Extracts:
+> **Immediate goal:** slice each agreement's HTML into clauses with hierarchy — text + nesting depth — so that concatenating the slices in document order reconstructs the document faithfully.
 
-1. **Content** — verbatim clause text per node.
-2. **Hierarchy** — parent/child/sibling relationships, addressable by stable canonical paths derived from clause IDs.
-3. **Document nuances** — subdocuments (named-in-source agreements bundled in one EX-10), Reading B exclusions (un-numbered preamble recitals), depth bounds (real EX-10 structure caps at 4 levels; specialized docs reach 7), parser-disagreement audit signals.
+That single criterion drives parser quality. Everything else (canonical schema, subdocument detection, classification taxonomies) is built on top of a parser that meets the bar. If concat-of-spans doesn't reproduce the source, the parser gets fixed before anything downstream gets built.
 
-Output: a structured per-document dataset where each clause has a deterministic canonical_path identifier. Downstream consumers run aggregate queries over the corpus directly against this representation.
+## What the pipeline produces
 
-This repo is the **destination for Claude Code**. It contains the spec, the schema, the design decisions, and the validated parsing primitives. Implementation phases are tracked as GitHub issues.
+A sequence of parser scripts each emit a JSONL where one line = one parsed clause:
 
-> **Status**: design locked, implementation pending. The canonical-ID parser (`src/clause_extract/canonical_id_parser.py`) has been validated 973/973 against the human-curated source-of-truth ledger (25 docs). The subdocument detector v1 has been validated against a hand-verified 100-doc sample at ~75% precision / 90% recall.
+```json
+{"idx": 4, "level": 2, "span": "INDEMNIFICATION AGREEMENT\nTHIS INDEMNIFICATION AGREEMENT (the \"Agreement\")..."}
+```
 
----
+- `idx` — corpus row index.
+- `level` — the parser's native nesting depth (doc2dict 0-indexed; lexnlp 1-indexed; intentionally not normalized so each parser's view is preserved).
+- `span` — heading + body. Concatenating all `span` values for one `idx` in JSONL order should approximate the source document.
 
-## What this project is
+The source-of-truth dump (`parse_source_of_truth.py`) is the unparsed reference per doc; `measure_reconstruction.py` produces a parquet with per-doc word coverage and char ratio per parser, so disagreement and content loss are visible per row.
 
-A **batch parsing pipeline** that runs once across the corpus and produces a structured representation of every clause in every document.
+## Current measured state (5-doc smoke set, `--no-truncate`)
 
-Inputs: 1,066 EX-10 exhibit agreements on HuggingFace (`arthrod/new3_results_master22017_274.59mb`).
+| parser | mean word coverage | range | what's missing |
+|---|---:|---|---|
+| doc2dict baseline | 91.5% | 88.8–95.7% | tables + mixed-content children dropped by `_collect_direct_text` |
+| doc2dict + agreement_config | 91.5% | 88.8–95.7% | same body extraction; only header typing differs |
+| lexnlp (regex) | 97.6% | 94.1–98.7% | closest to source — minor whitespace artifacts |
 
-Outputs: a HuggingFace dataset (`arthrod/clause-prob-canonical`, private) with **one row per source document** and canonical clause records as a nested struct column.
+Lex consistently reconstructs near-completely. doc2dict drops ~6–10% of content; the gap is in `_collect_direct_text` not capturing every text leaf (the `_is_text_leaf` heuristic skips tables and mixed-content children). Closing that gap is the immediate parser-quality work.
 
-For full goal framing — including what this project is **not** (a retrieval system, a clause classifier, a user-facing tool) — see [`docs/GOAL.md`](docs/GOAL.md).
+## Repo layout
 
-## Why a canonical schema
+```
+scripts/
+  parse_source_of_truth.py       reference baseline — bs4 plain text + full HTML per doc
+  parse_doc2dict_baseline.py     doc2dict with no mapping_dict
+  parse_doc2dict_with_config.py  doc2dict with the validated EX-10 levels regex
+  parse_lexnlp.py                lexnlp regex section detector (no overrides)
+  measure_reconstruction.py      per-doc word_coverage + char_ratio per parser
+  compare.py                     side-by-side dumps + body-overlap summary
 
-The two parsers we feed (doc2dict for HTML structural parsing; lexnlp's regex section detector for text-level cross-validation) disagree on hierarchical depth in roughly **75% of multi-level documents**. Both are deterministic; both are individually useful; neither's depth signal is authoritative. The canonical schema **derives `structural_depth` from the clause ID string itself** (`5` → 0, `5.1` → 1, `5.1.1` → 2) and demotes the parsers' depth signals to audit metadata.
+src/clause_extract/
+  canonical_id_parser.py         100% SOT-validated; clause-ID parsing primitive
+  agreement_config.py            doc2dict mapping_dict for EX-10 (lexnlp-informed)
+  lexnlp_sections_regex.py       AGPLv3 vendored from arthrod/lexpredict-lexnlp
+```
 
-This is empirically validated: see [`docs/DECISIONS.md`](docs/DECISIONS.md) for the depth-tracking measurement and [`docs/SCHEMA.md`](docs/SCHEMA.md) for the field-by-field spec.
+The four parser scripts above and `measure_reconstruction.py` are the immediate concern. Canonicalization, subdocument detection, and the HF dataset push (described in [`TASKS.md`](TASKS.md)) come after each parser meets the reconstruction bar.
+
+> **Status of locked artifacts (still valid):** the canonical-ID parser is 100% validated against the 973-clause source-of-truth ledger. The subdocument detector v1 design is documented in [`docs/DETECTOR.md`](docs/DETECTOR.md) and validates at ~75% precision / 90% recall on a hand-verified 100-doc sample.
 
 ## Install (Python 3.14 + uv)
 
@@ -50,36 +69,40 @@ uv sync                  # creates .venv with all deps including dev
 uv run pytest            # run tests (some require HF_TOKEN env var)
 ```
 
-Set environment variables:
 ```bash
 export HF_TOKEN=<your-huggingface-token>     # for SOT round-trip + corpus runs
 ```
 
-## Quickstart commands (planned, see issues)
+## Quickstart commands
 
 ```bash
-# Phase 1: validate canonical-ID parser against the human SOT ledger
+# Phase 0 (validation): canonical-ID parser round-trips the SOT ledger
 uv run pytest -m sot tests/test_canonical_id_parser_sot.py
 
-# Phase 1: run subdocument detector across the full corpus
-uv run clause-extract detect-subdocs --output data/runs/subdoc_detection.json
+# Phase 1 (parser quality): produce JSONLs and measure reconstruction
+HF_TOKEN=hf_xxx uv run scripts/parse_source_of_truth.py     --output-dir data/runs/source_of_truth
+HF_TOKEN=hf_xxx uv run scripts/parse_doc2dict_baseline.py    --output-dir data/runs/doc2dict_baseline    --no-truncate
+HF_TOKEN=hf_xxx uv run scripts/parse_doc2dict_with_config.py --output-dir data/runs/doc2dict_with_config --no-truncate
+HF_TOKEN=hf_xxx uv run scripts/parse_lexnlp.py               --output-dir data/runs/lexnlp_baseline      --no-truncate
 
-# Phase 2: run the post-processor end-to-end on a single doc (debugging)
-uv run clause-extract canonicalize --doc-idx 4
-
-# Phase 3-4: full corpus → push canonical dataset to HF
-uv run clause-extract canonicalize --corpus full --push-to-hub
+uv run scripts/measure_reconstruction.py \
+    --source-of-truth-dir data/runs/source_of_truth \
+    --d2d-baseline-dir    data/runs/doc2dict_baseline \
+    --d2d-config-dir      data/runs/doc2dict_with_config \
+    --lex-dir             data/runs/lexnlp_baseline \
+    --output-dir          data/runs/reconstruction
 ```
 
 ## For Claude Code
 
-If you're picking up implementation: read [`TASKS.md`](TASKS.md). It's the durable work plan with five phases, acceptance criteria, and validation gates. Start at Phase 0 (environment setup) and don't skip ahead.
+If you're picking up implementation: read [`TASKS.md`](TASKS.md). Phase 0 is environment setup; **Phase 1 is parser reconstruction quality** — pushing every parser's mean word coverage above the agreed bar (default ≥95%). Subsequent phases (canonicalization, schema, HF dataset push) build on a parser that meets the bar.
 
 ## Validation gates (must pass before merging Phase 5)
 
-1. **`canonical_id_parser` round-trips 973/973 SOT clauses** — every clause_id in the human ledger parses, reconstructs to the same string, and its derived parent is either `None` (root) or another clause_id present in the same ledger.
-2. **Subdocument detector matches hand-verified set on 100-doc sample at ≥80% precision and ≥85% recall.** The hand-verified ground truth is in [`docs/DETECTOR.md`](docs/DETECTOR.md).
-3. **End-to-end run on full corpus completes without errors** and writes a valid HF dataset.
+1. **Reconstruction-quality bar** — every parser's mean word coverage on the corpus is ≥95% (measured via `measure_reconstruction.py`), with no doc below 80%. Truncation off (`--no-truncate`) for the gate run.
+2. **`canonical_id_parser` round-trips 973/973 SOT clauses** — every clause_id in the human ledger parses, reconstructs to the same string, and its derived parent is either `None` (root) or another clause_id present in the same ledger.
+3. **Subdocument detector matches hand-verified set on 100-doc sample at ≥80% precision and ≥85% recall.** The hand-verified ground truth is in [`docs/DETECTOR.md`](docs/DETECTOR.md).
+4. **End-to-end run on full corpus completes without errors** and writes a valid HF dataset.
 
 ## Document map
 
@@ -87,39 +110,11 @@ If you're picking up implementation: read [`TASKS.md`](TASKS.md). It's the durab
 |---|---|
 | [`README.md`](README.md) | Now — landing page |
 | [`TASKS.md`](TASKS.md) | First if you're Claude Code — the implementation work plan |
-| [`docs/GOAL.md`](docs/GOAL.md) | First — what we're trying to accomplish, what success looks like, the iterative red/green TDD methodology |
+| [`docs/GOAL.md`](docs/GOAL.md) | Goal framing — slice-and-reconstruct as the immediate target, plus the eventual statistical use the corpus serves |
 | [`docs/SCHEMA.md`](docs/SCHEMA.md) | Before implementing the canonicalizer — canonical record fields, types, derivation rules |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | Before challenging a design choice — locked decisions with rationale and what would change our mind |
 | [`docs/DETECTOR.md`](docs/DETECTOR.md) | Before touching subdocument detection — algorithm, validation results, known false-positive/negative patterns |
 | [`docs/HANDOFF.md`](docs/HANDOFF.md) | What's locked, what's open, validation gates, where artifacts live |
-
-## Repository layout
-
-```
-clause-extract/
-├─ src/clause_extract/
-│  ├─ canonical_id_parser.py     # 100% SOT-validated; locked
-│  ├─ lexnlp_sections_regex.py   # AGPLv3 vendored from arthrod/lexpredict-lexnlp
-│  ├─ agreement_config.py        # doc2dict mapping_dict for EX-10s
-│  ├─ schema.py                  # pydantic models for canonical records  (TBD)
-│  ├─ subdoc_detector.py         # detector v1                            (TBD)
-│  ├─ canonicalizer.py           # combines dd+lex output into canonical (TBD)
-│  ├─ pipeline.py                # corpus-scale orchestration             (TBD)
-│  └─ cli.py                     # typer CLI                              (TBD)
-├─ tests/
-│  ├─ test_canonical_id_parser_sot.py    # validation gate 1
-│  ├─ test_subdoc_detector_100sample.py  # validation gate 2
-│  └─ ...
-├─ docs/
-│  ├─ GOAL.md
-│  ├─ SCHEMA.md
-│  ├─ DECISIONS.md
-│  ├─ DETECTOR.md
-│  └─ HANDOFF.md
-├─ scripts/                      # one-off analysis scripts
-├─ pyproject.toml
-└─ LICENSE                       # AGPLv3 (matches lexnlp lineage)
-```
 
 ## License
 
@@ -130,6 +125,6 @@ For the analytical scope (computing statistics by running this software internal
 ## Related repos
 
 - `arthrod/new3_results_master22017_274.59mb` — corpus (1,066 EX-10s, HF private)
-- `arthrod/clause-prob-source-of-truth` — manually-curated 25-doc ledger (HF private, ground truth for validation gate 1)
-- `arthrod/clause-prob-pipeline` — earlier pipeline / scratch code dump (HF private)
+- `arthrod/clause-prob-source-of-truth` — manually-curated 25-doc ledger (HF private, ground truth for validation gate 2)
+- `arthrod/clause-extract-inspection` — environment dump for reviewing session work (HF private)
 - `arthrod/lexpredict-lexnlp` — fork of LexPredict's lexnlp, source of the regex section patterns

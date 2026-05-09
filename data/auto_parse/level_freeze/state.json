@@ -1,0 +1,34 @@
+{
+  "current_idx": 1,
+  "frozen": [
+    0
+  ],
+  "history": [
+    {
+      "ts": "2026-05-08T23:51:34",
+      "action": "freeze",
+      "idx": 0,
+      "n_records": 19,
+      "note": "rolled back: glm-5.1 wrote parser output to inner data/auto_parse but freeze read outer; freeze captured stale 19-record file"
+    },
+    {
+      "ts": "2026-05-08T23:51:50",
+      "action": "advance",
+      "from_idx": 0,
+      "to_idx": 1,
+      "note": "rolled back together with freeze above"
+    },
+    {
+      "ts": "2026-05-08T23:54:37",
+      "action": "freeze",
+      "idx": 0,
+      "n_records": 67
+    },
+    {
+      "ts": "2026-05-08T23:54:44",
+      "action": "advance",
+      "from_idx": 0,
+      "to_idx": 1
+    }
+  ]
+}

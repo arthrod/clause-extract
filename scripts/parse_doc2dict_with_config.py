@@ -335,6 +335,12 @@ _SIG_PAGE_TITLE_RE = re.compile(
     r"^\[?\s*SIGNATURE\s+PAGE", re.IGNORECASE
 )
 
+# Anchored "IN WITNESS WHEREOF" — used as a fallback signature-block marker
+# when no `/s/` line and no SIGNATURE PAGE title is found. Pulled out of
+# `_STRUCTURAL_LEVELS` and given its own constant so the lookup site
+# below doesn't have to inspect another regex's `.pattern` string.
+_IN_WITNESS_WHEREOF_RE = re.compile(r"^IN\s+WITNESS\s+WHEREOF", re.IGNORECASE)
+
 
 def _is_real_subdoc_title(title: str | None, cls: str | None, is_envelope: bool, first_child_title: str | None = None) -> bool:
     """Return True if this section is a REAL subdocument (not the SEC envelope).
@@ -384,9 +390,8 @@ def _find_signature_cutoff(rows: list[dict[str, Any]]) -> int | None:
             if _SIG_PAGE_TITLE_RE.match(title):
                 last_sig_idx = i
                 continue
-            for pat, _ in _STRUCTURAL_LEVELS:
-                if pat.match(title) and "WITNESS" in pat.pattern and "WHEREOF" in pat.pattern:
-                    last_sig_idx = i
+            if _IN_WITNESS_WHEREOF_RE.match(title):
+                last_sig_idx = i
         if last_sig_idx is None:
             return None
 

@@ -1,5 +1,5 @@
 {
-  "current_idx": 14,
+  "current_idx": 15,
   "frozen": [
     0,
     1,
@@ -14,7 +14,8 @@
     10,
     11,
     12,
-    13
+    13,
+    14
   ],
   "history": [
     {
@@ -228,6 +229,18 @@
       "idx": 13,
       "n_records": 54,
       "note": "REFREEZE after promoting salvage parser (1143\u21921157 lines). The new parser adds l0_seen dedup (eliminates idx=13 second-L0-record rubric violation) AND subdoc-penalty descendant propagation. Two records shifted +1: 'FIRST AMENDMENT TO CREDIT AGREEMENT' L1\u2192L2, 'PROCEDURE FOR INITIAL TERM B LENDERS:' L2\u2192L3 \u2014 both inside Annex I and now rubrically correct (subdocs add +1 to descendants per rubric)."
+    },
+    {
+      "ts": "2026-05-09T18:32:04",
+      "action": "freeze",
+      "idx": 14,
+      "n_records": 330
+    },
+    {
+      "ts": "2026-05-09T18:32:16",
+      "action": "advance",
+      "from_idx": 14,
+      "to_idx": 15
     }
   ]
 }

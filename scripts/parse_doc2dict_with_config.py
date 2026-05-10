@@ -935,6 +935,113 @@ def _absorb_single_envelope_header(rows: list[dict[str, Any]]) -> list[dict[str,
     return rows
 
 
+def _absorb_page_header_exhibits(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Absorb non-envelope subdoc-class sections whose title is a bare
+    identifier (no descriptive text after the exhibit/schedule/appendix/annex
+    number). These are SEC page-header repetitions — filing metadata that
+    doc2dict splits into separate top-level sections. They are NOT real
+    subdocuments (no descriptive title per scope_rule.md), so their
+    descendants must NOT receive a subdoc-penalty.
+
+    Body text from absorbed sections is appended to the nearest
+    in-scope non-envelope record (typically the L0 agreement body),
+    preserving full document content in the JSONL output.
+
+    Example: "Exhibit 10.4" repeated as a page header throughout the
+    document. The first occurrence is the SEC envelope; subsequent ones
+    are page-header artefacts that split the agreement body.
+    """
+    by_node_id = {r["node_id"]: r for r in rows}
+    children_of: dict[int | None, list[dict[str, Any]]] = {}
+    for r in rows:
+        children_of.setdefault(r.get("parent_node_id"), []).append(r)
+
+    # Only absorb bare-identifier subdoc titles that repeat (page-header artefacts).
+    title_counts: Counter[str] = Counter()
+    for r in rows:
+        if r.get("is_envelope"):
+            continue
+        cls = (r.get("cls") or "")
+        if cls not in _SUBDOC_CLASSES:
+            continue
+        title = (r.get("title") or "").strip()
+        if not title or _REAL_SUBDOC_TITLE_RE.match(title):
+            continue
+        title_counts[title] += 1
+
+    dup_titles = {t for t, c in title_counts.items() if c > 1}
+
+    absorbed: list[dict[str, Any]] = []
+    for r in rows:
+        if r.get("is_envelope"):
+            continue
+        cls = (r.get("cls") or "")
+        if cls not in _SUBDOC_CLASSES:
+            continue
+        title = (r.get("title") or "").strip()
+        if not title:
+            continue
+        if _REAL_SUBDOC_TITLE_RE.match(title):
+            continue
+        if title not in dup_titles:
+            continue
+        r["is_envelope"] = True
+        absorbed.append(r)
+
+    if not absorbed:
+        return rows
+
+    def _fix_penalty(nid: int, extra: int) -> None:
+        node = by_node_id.get(nid)
+        if node is None:
+            return
+        if node["subdoc_penalty"] >= extra:
+            node["subdoc_penalty"] -= extra
+        node["depth"] = max(node["depth"] - extra, 0)
+        for ch in children_of.get(nid, []):
+            _fix_penalty(ch["node_id"], extra)
+
+    for r in absorbed:
+        for ch in children_of.get(r["node_id"], []):
+            _fix_penalty(ch["node_id"], 1)
+
+        body = (r.get("body_direct") or "").strip()
+        if not body:
+            continue
+        target = _find_body_merge_target(r, rows)
+        if target is not None:
+            existing = (target.get("body_direct") or "").rstrip()
+            target["body_direct"] = existing + "\n" + body if existing else body
+            target["body_direct_chars"] = len(target["body_direct"])
+
+    return rows
+
+
+def _find_body_merge_target(
+    source: dict[str, Any], rows: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    # Prefer the non-envelope depth-0 record with body text (the agreement L0).
+    for r in rows:
+        if (
+            not r.get("is_envelope")
+            and r.get("depth") == 0
+            and r.get("scope") != "trailer"
+            and (r.get("body_direct_chars") or 0) > 0
+        ):
+            return r
+
+    # Fallback: any non-envelope in-scope record with body text.
+    for r in rows:
+        if (
+            not r.get("is_envelope")
+            and r.get("scope") != "trailer"
+            and (r.get("body_direct_chars") or 0) > 0
+        ):
+            return r
+
+    return None
+
+
 def _merge_title_fragments(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Merge consecutive empty-body title-fragment siblings into the L0 record.
 
@@ -959,7 +1066,6 @@ def _merge_title_fragments(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for r in rows:
         children_of.setdefault(r.get("parent_node_id"), []).append(r)
 
-    # Find the L0 record (first non-envelope, non-trailer with depth 0)
     l0: dict[str, Any] | None = None
     for r in rows:
         if r.get("depth") == 0 and not r.get("is_envelope") and r.get("scope") != "trailer":
@@ -968,7 +1074,6 @@ def _merge_title_fragments(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if l0 is None:
         return rows
 
-    # Collect preceding siblings of the L0 record
     parent_id = l0.get("parent_node_id")
     siblings = children_of.get(parent_id, [])
     fragments: list[dict[str, Any]] = []
@@ -978,6 +1083,67 @@ def _merge_title_fragments(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         fragments.append(sib)
 
     if not fragments:
+        # Forward-merge: if the first L0 is an empty-body "predicted header"
+        # and the NEXT sibling (same parent) is also depth-0 with body text,
+        # merge the empty fragment forward into the sibling with body.
+        parent_id = l0.get("parent_node_id")
+        siblings = children_of.get(parent_id, [])
+        l0_idx = next(
+            (i for i, s in enumerate(siblings) if s["node_id"] == l0["node_id"]),
+            None,
+        )
+        if (
+            l0_idx is not None
+            and l0_idx + 1 < len(siblings)
+            and (l0.get("cls") or "") == "predicted header"
+            and not l0.get("body_direct_chars")
+            and not l0.get("is_envelope")
+        ):
+            nxt = siblings[l0_idx + 1]
+            if (
+                nxt.get("depth") == 0
+                and not nxt.get("is_envelope")
+                and (nxt.get("body_direct_chars") or 0) > 0
+            ):
+                parts = [
+                    p
+                    for p in [l0.get("title", "").strip(), nxt.get("title", "").strip()]
+                    if p
+                ]
+                nxt["title"] = " ".join(parts)
+                l0["is_envelope"] = True
+
+                # Absorb duplicate exhibit headers splitting the agreement body
+                # across multiple nodes (SEC page-header repetition pattern).
+                envelope_title = (
+                    by_node_id.get(l0.get("parent_node_id"))
+                    or {}
+                ).get("title", "")
+                if envelope_title:
+                    for r in rows:
+                        if (
+                            not r.get("is_envelope")
+                            and (r.get("cls") or "") in _SUBDOC_CLASSES
+                            and (r.get("title") or "").strip() == envelope_title
+                        ):
+                            kids = children_of.get(r["node_id"], [])
+                            has_real_child = any(
+                                k.get("body_direct_chars", 0) > 0
+                                for k in kids
+                                if not k.get("is_envelope")
+                            )
+                            if has_real_child:
+                                continue
+                            r["is_envelope"] = True
+                            for k in kids:
+                                k["is_envelope"] = True
+                            body = (r.get("body_direct") or "").strip()
+                            if body:
+                                existing = (nxt.get("body_direct") or "").rstrip()
+                                nxt["body_direct"] = (
+                                    existing + "\n" + body if existing else body
+                                )
+                                nxt["body_direct_chars"] = len(nxt["body_direct"])
         return rows
 
     # All fragments must be empty-body "predicted header" nodes
@@ -1007,19 +1173,63 @@ def _merge_title_fragments(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         r"^(?:AMENDMENT|AGREEMENT|PLAN|LICENSE|CONTRACT|INDENTURE|LEASE|LOAN|CREDIT|PURCHASE|SALE|SUPPLY|OPTION|WARRANT|NOTE|GUARANTEE|EMPLOYMENT|SEVERANCE|RETENTION|RESTRICTED|STOCK|INCENTIVE|BONUS|DEFERRED|COMPENSATION|PENSION|TRUST|SETTLEMENT|RELEASE|WAIVER|CONSENT|AMENDMENT|MODIFICATION|SUPPLEMENT|RATIFICATION|RESTATEMENT|TERMINATION|ASSIGNMENT|DELEGATION|NOVELATION|ASSUMPTION|SUBORDINATION|NONCOMPETITION|NONSOLICITATION|CONFIDENTIALITY|PROPRIETARY|INFORMATION|TRANSFER|CHANGE\s+OF\s+CONTROL|SHAREHOLDER|STOCKHOLDER|REGISTRATION|RIGHTS|COVENANT|VOTING|IRREVOCABLE|PROXY|POWER\s+OF\s+ATTORNEY|NOTICE|MEMORANDUM|LETTER|SIDE\s+LETTER|FEE\s+LETTER|COMMITMENT|TERM\s+SHEET)",
         re.IGNORECASE,
     )
+    _TITLE_END_RE = re.compile(
+        r"(?:AGREEMENT|PLAN|POLICY|CONTRACT|INDENTURE|LEASE|LOAN|NOTE|GUARANTEE|COMPENSATION|PROGRAM|TRUST)$",
+        re.IGNORECASE,
+    )
+    _CORP_SUFFIX_RE = re.compile(
+        r"(?:INC\.|L\.?L\.?C\.?|LTD\.?|CORP\.|CORPORATION|CO\.|COMPANY|N\.A\.|N\.V\.|S\.A\.|S\.B\.|B\.V\.|G\.M\.B\.H\.|A\.G\.|P\.L\.C\.|LIMITED)\s*$",
+        re.IGNORECASE,
+    )
     l0_title_stripped = (l0.get("title") or "").strip()
-    # If L0 title already starts with a document-type keyword, it's complete
     if _TITLE_START_RE.match(l0_title_stripped):
         return rows
-    # If merged title starts with an ordinal amendment pattern, accept
-    if not _ORDINAL_AMENDMENT_START_RE.match(merged_title):
+    if _ORDINAL_AMENDMENT_START_RE.match(merged_title):
+        pass
+    elif _TITLE_END_RE.search(l0_title_stripped) and all(
+        _CORP_SUFFIX_RE.search(frag.get("title", ""))
+        for frag in fragments
+    ):
+        pass
+    else:
         return rows
 
     l0["title"] = merged_title
 
-    # Mark fragments as envelope so they drop from JSONL
     for frag in fragments:
         frag["is_envelope"] = True
+
+    # Absorb duplicate exhibit headers splitting the agreement body
+    # across multiple nodes (SEC page-header repetition pattern).
+    envelope_title = (
+        by_node_id.get(l0.get("parent_node_id"))
+        or {}
+    ).get("title", "")
+    if envelope_title:
+        for r in rows:
+            if (
+                not r.get("is_envelope")
+                and (r.get("cls") or "") in _SUBDOC_CLASSES
+                and (r.get("title") or "").strip() == envelope_title
+            ):
+                kids = children_of.get(r["node_id"], [])
+                has_real_child = any(
+                    k.get("body_direct_chars", 0) > 0
+                    for k in kids
+                    if not k.get("is_envelope")
+                )
+                if has_real_child:
+                    continue
+                r["is_envelope"] = True
+                for k in kids:
+                    k["is_envelope"] = True
+                body = (r.get("body_direct") or "").strip()
+                if body:
+                    existing = (l0.get("body_direct") or "").rstrip()
+                    l0["body_direct"] = (
+                        existing + "\n" + body if existing else body
+                    )
+                    l0["body_direct_chars"] = len(l0["body_direct"])
 
     return rows
 
@@ -1065,11 +1275,10 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
     sections = _apply_scope_rule(sections)
     sections = _absorb_envelope_passthrough_chain(sections)
     sections = _absorb_single_envelope_header(sections)
-    sections = _merge_title_fragments(sections)
 
-    # Structural L0 fallback: if no title matched the AGREEMENT/PLAN
-    # pattern (e.g. guarantee letters, side letters), promote the first
-    # non-envelope in-scope record with body text to level 0.
+    # Structural L0 fallback: promote the first non-envelope in-scope
+    # record with body text to level 0 before title-fragment merging,
+    # so _merge_title_fragments can see the L0 and merge fragments.
     has_l0 = any(s["depth"] == 0 and not s.get("is_envelope") for s in sections)
     if not has_l0:
         for s in sections:
@@ -1079,6 +1288,7 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
                 s["depth"] = 0
                 break
 
+    sections = _merge_title_fragments(sections)
     base["parse_status"] = "ok"
     base["n_section_nodes"] = len(sections)
     base["max_depth"] = max((s["depth"] for s in sections), default=0)

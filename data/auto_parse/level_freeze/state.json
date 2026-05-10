@@ -1,5 +1,5 @@
 {
-  "current_idx": 28,
+  "current_idx": 35,
   "frozen": [
     0,
     1,
@@ -28,7 +28,14 @@
     24,
     25,
     26,
-    27
+    27,
+    28,
+    29,
+    30,
+    31,
+    32,
+    33,
+    34
   ],
   "history": [
     {
@@ -410,6 +417,131 @@
       "action": "advance",
       "from_idx": 27,
       "to_idx": 28
+    },
+    {
+      "ts": "2026-05-09T23:35:37",
+      "action": "freeze",
+      "idx": 28,
+      "n_records": 15
+    },
+    {
+      "ts": "2026-05-09T23:35:51",
+      "action": "advance",
+      "from_idx": 28,
+      "to_idx": 29
+    },
+    {
+      "ts": "2026-05-09T23:48:34",
+      "action": "freeze",
+      "idx": 29,
+      "n_records": 21
+    },
+    {
+      "ts": "2026-05-09T23:48:41",
+      "action": "advance",
+      "from_idx": 29,
+      "to_idx": 30
+    },
+    {
+      "ts": "2026-05-09T23:51:12",
+      "action": "freeze",
+      "idx": 30,
+      "n_records": 2
+    },
+    {
+      "ts": "2026-05-09T23:51:19",
+      "action": "advance",
+      "from_idx": 30,
+      "to_idx": 31
+    },
+    {
+      "ts": "2026-05-09T23:57:42",
+      "action": "freeze",
+      "idx": 31,
+      "n_records": 16
+    },
+    {
+      "ts": "2026-05-09T23:57:49",
+      "action": "advance",
+      "from_idx": 31,
+      "to_idx": 32
+    },
+    {
+      "ts": "2026-05-10T00:04:35",
+      "action": "freeze",
+      "idx": 32,
+      "n_records": 14
+    },
+    {
+      "ts": "2026-05-10T00:07:34",
+      "action": "freeze",
+      "idx": 32,
+      "n_records": 14
+    },
+    {
+      "ts": "2026-05-10T00:08:09",
+      "action": "advance",
+      "from_idx": 32,
+      "to_idx": 33
+    },
+    {
+      "ts": "2026-05-10T00:09:33",
+      "action": "split_overshoot",
+      "note": "Agent overshot during idx=31 dispatch and froze both idx=31 AND idx=32. dispatch_and_pr.sh detected and exited cleanly. State rolled back here to reflect idx=31 freeze only; idx=32 will be committed on a separate stacked PR (loop/idx-32) with its own state.json mutation back up to current_idx=33."
+    },
+    {
+      "ts": "2026-05-10T00:10:28",
+      "action": "split_overshoot_part2",
+      "note": "idx=32 freeze committed on stacked branch loop/idx-32 after the idx=31 overshoot was split. State now reflects both idx=31 and idx=32 frozen; current_idx=33 is the next dispatch target."
+    },
+    {
+      "ts": "2026-05-10T01:18:21",
+      "action": "refreeze",
+      "idx": 27,
+      "n_records": 26,
+      "note": "Redo of idx=27 after body-splitter parser pass (in-text structural-marker decomposition). Previous freeze was a single mega-record because doc2dict collapsed the body into one node; new parser splits inline by 1./numbered, (a)/lettered, (i)/roman markers. regress.py passes for all 33 frozen idxs."
+    },
+    {
+      "ts": "2026-05-10T00:56:05",
+      "action": "freeze",
+      "idx": 33,
+      "n_records": 14
+    },
+    {
+      "ts": "2026-05-10T00:56:22",
+      "action": "advance",
+      "from_idx": 33,
+      "to_idx": 34
+    },
+    {
+      "ts": "2026-05-10T02:24:14",
+      "action": "freeze",
+      "idx": 15,
+      "n_records": 24
+    },
+    {
+      "ts": "2026-05-10T02:24:14",
+      "action": "freeze",
+      "idx": 23,
+      "n_records": 24
+    },
+    {
+      "ts": "2026-05-10T02:24:14",
+      "action": "freeze",
+      "idx": 33,
+      "n_records": 22
+    },
+    {
+      "ts": "2026-05-10T02:30:57",
+      "action": "freeze",
+      "idx": 34,
+      "n_records": 55
+    },
+    {
+      "ts": "2026-05-10T02:31:10",
+      "action": "advance",
+      "from_idx": 34,
+      "to_idx": 35
     }
   ]
 }

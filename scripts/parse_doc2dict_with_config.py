@@ -253,6 +253,7 @@ _STRUCTURAL_LEVELS: list[tuple[re.Pattern[str], int]] = [
     (re.compile(r"^EXHIBIT\s+", re.IGNORECASE), 1),
     (re.compile(r"^WITNESSETH", re.IGNORECASE), 1),
     (re.compile(r"^IN\s+WITNESS\s+WHEREOF", re.IGNORECASE), 1),
+    (re.compile(r"^\[?\s*SIGNATURE\s+PAGES\s+FOLLOW", re.IGNORECASE), 1),
     (re.compile(r"^SIGNATURE\s+PAGE", re.IGNORECASE), 1),
     (re.compile(r"^[A-Z]+\.?\s*(Inc|Corp|LLC|Ltd|Company|Co)\.?\b", re.IGNORECASE), 1),
     (re.compile(r"^INDEMNITEE$", re.IGNORECASE), 1),

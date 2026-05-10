@@ -985,6 +985,14 @@ def _absorb_page_header_exhibits(rows: list[dict[str, Any]]) -> list[dict[str, A
             continue
         if title not in dup_titles:
             continue
+        # Skip nodes with non-trivial children — they're real sections,
+        # not page-header repetitions.
+        kids = children_of.get(r["node_id"], [])
+        if any(
+            (ch.get("body_direct") or "").strip() or ch.get("cls") != "promoted text leaf"
+            for ch in kids
+        ):
+            continue
         r["is_envelope"] = True
         absorbed.append(r)
 
@@ -1001,18 +1009,235 @@ def _absorb_page_header_exhibits(rows: list[dict[str, Any]]) -> list[dict[str, A
         for ch in children_of.get(nid, []):
             _fix_penalty(ch["node_id"], extra)
 
+    merge_targets_used: set[int] = set()
     for r in absorbed:
+        target = _find_body_merge_target(r, rows)
+        parts_to_merge: list[str] = []
+        body = (r.get("body_direct") or "").strip()
+        if body:
+            parts_to_merge.append(body)
+
+        def _collect_child_body(nid: int) -> None:
+            for ch in children_of.get(nid, []):
+                ch["is_envelope"] = True
+                ch_body = (ch.get("body_direct") or "").strip()
+                if ch_body:
+                    parts_to_merge.append(ch_body)
+                _collect_child_body(ch["node_id"])
+
         for ch in children_of.get(r["node_id"], []):
             _fix_penalty(ch["node_id"], 1)
+            ch["is_envelope"] = True
+            ch_body = (ch.get("body_direct") or "").strip()
+            if ch_body:
+                parts_to_merge.append(ch_body)
+            _collect_child_body(ch["node_id"])
 
-        body = (r.get("body_direct") or "").strip()
+        if parts_to_merge and target is not None:
+            existing = (target.get("body_direct") or "").rstrip()
+            merged = "\n".join(parts_to_merge)
+            target["body_direct"] = existing + "\n" + merged if existing else merged
+            target["body_direct_chars"] = len(target["body_direct"])
+            merge_targets_used.add(target["node_id"])
+
+    for tid in merge_targets_used:
+        target = by_node_id.get(tid)
+        if target is None:
+            continue
+        for ch in children_of.get(tid, []):
+            if not ch.get("is_envelope") and (ch.get("cls") or "") == "promoted text leaf":
+                ch["is_envelope"] = True
+
+    return rows
+
+
+def _absorb_repeating_page_markers(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Absorb repeating empty-body "predicted header" nodes that are SEC
+    page-header artefacts (e.g. confidentiality-treatment identifiers,
+    "CSAPAGE N" markers that split section body across pages).
+
+    Some SEC filings insert the same page-header identifier (e.g.
+    "SAVARA-CONSULTANT") repeatedly throughout the document, splitting
+    each numbered section's body across multiple HTML divs.  Each
+    occurrence becomes a separate "predicted header" node with no body
+    text, and the continuation text ends up in its children.
+
+    Criteria: a non-envelope "predicted header" node whose stripped
+    title appears 3+ times across the document AND has no body text is
+    a page-header artefact.  Absorb it (is_envelope=True) and merge
+    any descendant body text into the nearest in-scope ancestor with
+    body text (typically the grandparent numbered section).
+    """
+    by_node_id = {r["node_id"]: r for r in rows}
+
+    # SEC page-marker pattern: uppercase identifiers with hyphens/dots,
+    # or "CSAPAGE N" / "PAGE N" page-number markers.
+    _SEC_MARKER_RE = re.compile(
+        r"^[A-Z][A-Z0-9.\-]{2,}[A-Z0-9]$"  # e.g. SAVARA-CONSULTANT (min 4 chars)
+        r"|^[A-Z]*PAGE\s+\d+$"               # e.g. CSAPAGE 1, PAGE 3
+        r"|^\[THE REMAINDER OF THIS PAGE"     # e.g. [THE REMAINDER OF THIS PAGE...
+        r"|^\[THE SIGNATURE PAGE"             # e.g. [THE SIGNATURE PAGE...
+        )
+
+    title_counts: Counter[str] = Counter()
+    for r in rows:
+        if r.get("is_envelope"):
+            continue
+        if (r.get("cls") or "") != "predicted header":
+            continue
+        if (r.get("body_direct_chars") or 0) > 0:
+            continue
+        title = (r.get("title") or "").strip()
+        if not title:
+            continue
+        if not _SEC_MARKER_RE.search(title):
+            continue
+        title_counts[title] += 1
+
+    repeating_titles = {t for t, c in title_counts.items() if c >= 2}
+    if not repeating_titles:
+        return rows
+
+    children_of: dict[int | None, list[dict[str, Any]]] = {}
+    for r in rows:
+        children_of.setdefault(r.get("parent_node_id"), []).append(r)
+
+    def _collect_subtree_body(nid: int) -> str:
+        parts: list[str] = []
+        node = by_node_id.get(nid)
+        if node is None:
+            return ""
+        body = (node.get("body_direct") or "").strip()
+        if body:
+            parts.append(body)
+        for ch in children_of.get(nid, []):
+            parts.append(_collect_subtree_body(ch["node_id"]))
+        return "\n".join(p for p in parts if p)
+
+    def _find_merge_ancestor(row: dict[str, Any]) -> dict[str, Any] | None:
+        cur_id = row.get("parent_node_id")
+        visited: set[int | None] = set()
+        while cur_id is not None and cur_id not in visited:
+            visited.add(cur_id)
+            parent = by_node_id.get(cur_id)
+            if parent is None:
+                break
+            if not parent.get("is_envelope") and (parent.get("body_direct_chars") or 0) > 0:
+                return parent
+            cur_id = parent.get("parent_node_id")
+        return None
+
+    absorbed: list[dict[str, Any]] = []
+    for r in rows:
+        if r.get("is_envelope"):
+            continue
+        title = (r.get("title") or "").strip()
+        if not title:
+            continue
+        if (r.get("cls") or "") != "predicted header":
+            continue
+        if (r.get("body_direct_chars") or 0) > 0:
+            continue
+        if title not in repeating_titles:
+            continue
+        r["is_envelope"] = True
+        absorbed.append(r)
+
+    if not absorbed:
+        return rows
+
+    for r in absorbed:
+        body = _collect_subtree_body(r["node_id"])
         if not body:
             continue
-        target = _find_body_merge_target(r, rows)
+        target = _find_merge_ancestor(r)
         if target is not None:
             existing = (target.get("body_direct") or "").rstrip()
             target["body_direct"] = existing + "\n" + body if existing else body
             target["body_direct_chars"] = len(target["body_direct"])
+
+    # Mark all descendants of absorbed nodes as envelope too
+    def _mark_descendants(nid: int) -> None:
+        for ch in children_of.get(nid, []):
+            ch["is_envelope"] = True
+            _mark_descendants(ch["node_id"])
+
+    for r in absorbed:
+        _mark_descendants(r["node_id"])
+
+    return rows
+
+
+def _absorb_repeated_title_headers(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Absorb non-envelope "predicted header" nodes whose title matches the
+    L0 record's title.  These are SEC page-header repetitions that
+    doc2dict splits into separate sections.  Their children are agreement
+    body content and should NOT receive a subdoc penalty.
+
+    Example: "FIFTH AMENDMENT TO OFFICE LEASE" appears at L0 and again
+    as page headers later in the document.  The page-header copies
+    become "predicted header" siblings under the envelope; their
+    numbered-section children wrongly inherit +1 from
+    is_secondary_agreement.  Absorbing the copies removes the penalty
+    so sections 3–11 map to L2 as intended.
+    """
+    by_node_id = {r["node_id"]: r for r in rows}
+    children_of: dict[int | None, list[dict[str, Any]]] = {}
+    for r in rows:
+        children_of.setdefault(r.get("parent_node_id"), []).append(r)
+
+    l0: dict[str, Any] | None = None
+    for r in rows:
+        if r.get("depth") == 0 and not r.get("is_envelope") and r.get("scope") != "trailer":
+            l0 = r
+            break
+    if l0 is None:
+        return rows
+
+    l0_title = (l0.get("title") or "").strip()
+    if not l0_title:
+        return rows
+
+    l0_parent_id = l0.get("parent_node_id")
+    siblings = children_of.get(l0_parent_id, [])
+    # Only absorb siblings that appear AFTER the L0 record in document
+    # order.  Fragments before L0 are legitimate title pieces (handled
+    # by _merge_title_fragments) — only post-L0 repetitions are
+    # page-header artefacts.
+    past_l0 = False
+    to_absorb: list[dict[str, Any]] = []
+    for sib in siblings:
+        if sib["node_id"] == l0["node_id"]:
+            past_l0 = True
+            continue
+        if not past_l0:
+            continue
+        if sib.get("is_envelope"):
+            continue
+        if (sib.get("cls") or "") != "predicted header":
+            continue
+        sib_title = (sib.get("title") or "").strip()
+        if sib_title != l0_title:
+            continue
+        to_absorb.append(sib)
+
+    if not to_absorb:
+        return rows
+
+    def _fix_penalty(nid: int, extra: int) -> None:
+        node = by_node_id.get(nid)
+        if node is None:
+            return
+        if node["subdoc_penalty"] >= extra:
+            node["subdoc_penalty"] -= extra
+        node["depth"] = max(node["depth"] - extra, 0)
+        for ch in children_of.get(nid, []):
+            _fix_penalty(ch["node_id"], extra)
+
+    for r in to_absorb:
+        r["is_envelope"] = True
+        for ch in children_of.get(r["node_id"], []):
+            _fix_penalty(ch["node_id"], 1)
 
     return rows
 
@@ -1234,6 +1459,179 @@ def _merge_title_fragments(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
+_FLAT_SECTION_SPLIT_RE = re.compile(
+    r"\n+"
+    r"(?="
+    r"\d+\."              # "1." numbered section (no space required after dot)
+    r"|\([a-z]\)"         # "(a)" lettered subsection
+    r"|\([ivx]+\)"        # "(i)" roman numeral
+    r")"
+)
+
+_FLAT_SECTION_MARKER_RE = re.compile(
+    r"^\s*"
+    r"(?:"
+    r"\d+\.\s"
+    r"|\d+\.[A-Za-z]"
+    r"|\([a-z]\)\s"
+    r"|\([ivx]+\)\s"
+    r"|\([A-Z]\)\s"
+    r"|\(\d+\)\s"
+    r")"
+)
+
+_PAGE_NUMBER_TITLE_RE = re.compile(r"^\s*-+\s*\d+\s*-+\s*$")
+_NOISE_CONNECTIVE_RE = re.compile(
+    r"^\s*(?:AND|OR|BY|TO|FROM|FOR|IN|AT|ON|OF|WITH)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_noise_child(node: dict[str, Any]) -> bool:
+    """Return True if a child node is structurally noise (page number,
+    single-word connective, etc.) rather than a real section heading."""
+    title = (node.get("title") or "").strip()
+    if not title:
+        return False
+    if _PAGE_NUMBER_TITLE_RE.match(title):
+        return True
+    if _NOISE_CONNECTIVE_RE.match(title):
+        return True
+    return False
+
+
+def _infer_level_from_split_title(title: str) -> int:
+    if not title:
+        return 2
+    t = title.strip()
+    if re.match(r"\d+\.", t):
+        return 2
+    if re.match(r"\([a-z]\)", t):
+        return 3
+    if re.match(r"\([ivx]+\)", t):
+        return 4
+    return 2
+
+
+def _split_flat_body_into_sections(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_node_id = {r["node_id"]: r for r in rows}
+    children_of: dict[int | None, list[dict[str, Any]]] = {}
+    for r in rows:
+        children_of.setdefault(r.get("parent_node_id"), []).append(r)
+
+    l0: dict[str, Any] | None = None
+    for r in rows:
+        if r.get("depth") == 0 and not r.get("is_envelope") and r.get("scope") != "trailer":
+            l0 = r
+            break
+    if l0 is None:
+        return rows
+
+    l0_id = l0["node_id"]
+    kids = children_of.get(l0_id, [])
+    # A child counts as "real" only if it isn't an envelope, isn't a
+    # trailer, and isn't structural noise (page numbers, single-word
+    # connectives). The Separation Agreement template attaches all the
+    # numbered sections as inline body of the L0 "AGREEMENT" node, while
+    # the doc2dict tree decoration produces page-number children
+    # ("- 2 -", "- 3 -", ...) that hold continuation body but no real
+    # heading content. Treat those as flat-equivalent so the splitter
+    # fires.
+    real_kids = [
+        k for k in kids
+        if not k.get("is_envelope")
+        and k.get("scope") != "trailer"
+        and not _is_noise_child(k)
+    ]
+    if real_kids:
+        return rows
+
+    parts_to_merge: list[str] = []
+    for ch in kids:
+        ch_body = (ch.get("body_direct") or "").strip()
+        if ch_body:
+            parts_to_merge.append(ch_body)
+        for gch in children_of.get(ch["node_id"], []):
+            gch_body = (gch.get("body_direct") or "").strip()
+            if gch_body:
+                parts_to_merge.append(gch_body)
+            gch["is_envelope"] = True
+        ch["is_envelope"] = True
+
+    if parts_to_merge:
+        existing = (l0.get("body_direct") or "").rstrip()
+        merged = "\n".join(parts_to_merge)
+        l0["body_direct"] = existing + "\n" + merged if existing else merged
+        l0["body_direct_chars"] = len(l0["body_direct"])
+
+    body = (l0.get("body_direct") or "").strip()
+    if not body:
+        return rows
+
+    body = re.sub(r"\nExhibit\s+\d+\.\d+\s*\n", "\n", body)
+
+    parts = _FLAT_SECTION_SPLIT_RE.split(body)
+    parts = [p.strip() for p in parts if p.strip()]
+    if not parts:
+        return rows
+
+    first_part = parts[0]
+    first_has_marker = bool(_FLAT_SECTION_MARKER_RE.match(first_part))
+
+    if first_has_marker:
+        preamble_text = ""
+        section_parts = parts
+    else:
+        preamble_text = first_part
+        section_parts = parts[1:]
+
+    if not section_parts:
+        return rows
+
+    l0["body_direct"] = preamble_text
+    l0["body_direct_chars"] = len(preamble_text)
+
+    _HEADING_RE = re.compile(
+        r"^((?:\d+\.|\([a-z]\)|\([ivx]+\)|\([A-Z]\)|\(\d+\))"
+        r"[^\n]*?)(?:\.\s|\.\xa0|\n|$)"
+    )
+
+    counter_val = max((r["node_id"] for r in rows), default=0) + 1
+    new_rows: list[dict[str, Any]] = []
+    for part in section_parts:
+        m = _HEADING_RE.match(part)
+        if m:
+            heading = m.group(1).strip()
+            body_text = part[m.end():].strip()
+        else:
+            lines = part.split("\n", 1)
+            heading = lines[0].strip()
+            body_text = lines[1].strip() if len(lines) > 1 else ""
+
+        level = _infer_level_from_split_title(heading)
+
+        new_rows.append({
+            "node_id": counter_val,
+            "parent_node_id": l0_id,
+            "depth": level,
+            "doc2dict_section_key": f"_flat_{counter_val}",
+            "cls": "promoted text leaf",
+            "title": heading,
+            "standardized_title": None,
+            "n_direct_section_children": 0,
+            "body_direct_chars": len(body_text),
+            "body_recursive_chars": len(part),
+            "body_direct": body_text,
+            "body_recursive": part,
+            "subdoc_penalty": 0,
+            "is_envelope": False,
+        })
+        counter_val += 1
+
+    rows.extend(new_rows)
+    return rows
+
+
 def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     size_kb = round(len(raw) / 1024, 2)
     base: dict[str, Any] = {
@@ -1275,6 +1673,8 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
     sections = _apply_scope_rule(sections)
     sections = _absorb_envelope_passthrough_chain(sections)
     sections = _absorb_single_envelope_header(sections)
+    sections = _absorb_repeating_page_markers(sections)
+    sections = _absorb_repeated_title_headers(sections)
 
     # Structural L0 fallback: promote the first non-envelope in-scope
     # record with body text to level 0 before title-fragment merging,
@@ -1289,6 +1689,7 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
                 break
 
     sections = _merge_title_fragments(sections)
+    sections = _split_flat_body_into_sections(sections)
     base["parse_status"] = "ok"
     base["n_section_nodes"] = len(sections)
     base["max_depth"] = max((s["depth"] for s in sections), default=0)

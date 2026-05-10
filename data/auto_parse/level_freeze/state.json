@@ -511,6 +511,24 @@
       "action": "advance",
       "from_idx": 33,
       "to_idx": 34
+    },
+    {
+      "ts": "2026-05-10T02:24:14",
+      "action": "freeze",
+      "idx": 15,
+      "n_records": 24
+    },
+    {
+      "ts": "2026-05-10T02:24:14",
+      "action": "freeze",
+      "idx": 23,
+      "n_records": 24
+    },
+    {
+      "ts": "2026-05-10T02:24:14",
+      "action": "freeze",
+      "idx": 33,
+      "n_records": 22
     }
   ]
 }

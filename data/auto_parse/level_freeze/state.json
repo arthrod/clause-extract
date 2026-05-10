@@ -491,6 +491,13 @@
       "ts": "2026-05-10T00:10:28",
       "action": "split_overshoot_part2",
       "note": "idx=32 freeze committed on stacked branch loop/idx-32 after the idx=31 overshoot was split. State now reflects both idx=31 and idx=32 frozen; current_idx=33 is the next dispatch target."
+    },
+    {
+      "ts": "2026-05-10T01:18:21",
+      "action": "refreeze",
+      "idx": 27,
+      "n_records": 26,
+      "note": "Redo of idx=27 after body-splitter parser pass (in-text structural-marker decomposition). Previous freeze was a single mega-record because doc2dict collapsed the body into one node; new parser splits inline by 1./numbered, (a)/lettered, (i)/roman markers. regress.py passes for all 33 frozen idxs."
     }
   ]
 }

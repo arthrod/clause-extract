@@ -1134,6 +1134,80 @@ def _absorb_repeating_page_markers(rows: list[dict[str, Any]]) -> list[dict[str,
     return rows
 
 
+def _absorb_repeated_title_headers(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Absorb non-envelope "predicted header" nodes whose title matches the
+    L0 record's title.  These are SEC page-header repetitions that
+    doc2dict splits into separate sections.  Their children are agreement
+    body content and should NOT receive a subdoc penalty.
+
+    Example: "FIFTH AMENDMENT TO OFFICE LEASE" appears at L0 and again
+    as page headers later in the document.  The page-header copies
+    become "predicted header" siblings under the envelope; their
+    numbered-section children wrongly inherit +1 from
+    is_secondary_agreement.  Absorbing the copies removes the penalty
+    so sections 3–11 map to L2 as intended.
+    """
+    by_node_id = {r["node_id"]: r for r in rows}
+    children_of: dict[int | None, list[dict[str, Any]]] = {}
+    for r in rows:
+        children_of.setdefault(r.get("parent_node_id"), []).append(r)
+
+    l0: dict[str, Any] | None = None
+    for r in rows:
+        if r.get("depth") == 0 and not r.get("is_envelope") and r.get("scope") != "trailer":
+            l0 = r
+            break
+    if l0 is None:
+        return rows
+
+    l0_title = (l0.get("title") or "").strip()
+    if not l0_title:
+        return rows
+
+    l0_parent_id = l0.get("parent_node_id")
+    siblings = children_of.get(l0_parent_id, [])
+    # Only absorb siblings that appear AFTER the L0 record in document
+    # order.  Fragments before L0 are legitimate title pieces (handled
+    # by _merge_title_fragments) — only post-L0 repetitions are
+    # page-header artefacts.
+    past_l0 = False
+    to_absorb: list[dict[str, Any]] = []
+    for sib in siblings:
+        if sib["node_id"] == l0["node_id"]:
+            past_l0 = True
+            continue
+        if not past_l0:
+            continue
+        if sib.get("is_envelope"):
+            continue
+        if (sib.get("cls") or "") != "predicted header":
+            continue
+        sib_title = (sib.get("title") or "").strip()
+        if sib_title != l0_title:
+            continue
+        to_absorb.append(sib)
+
+    if not to_absorb:
+        return rows
+
+    def _fix_penalty(nid: int, extra: int) -> None:
+        node = by_node_id.get(nid)
+        if node is None:
+            return
+        if node["subdoc_penalty"] >= extra:
+            node["subdoc_penalty"] -= extra
+        node["depth"] = max(node["depth"] - extra, 0)
+        for ch in children_of.get(nid, []):
+            _fix_penalty(ch["node_id"], extra)
+
+    for r in to_absorb:
+        r["is_envelope"] = True
+        for ch in children_of.get(r["node_id"], []):
+            _fix_penalty(ch["node_id"], 1)
+
+    return rows
+
+
 def _find_body_merge_target(
     source: dict[str, Any], rows: list[dict[str, Any]]
 ) -> dict[str, Any] | None:
@@ -1393,6 +1467,7 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
     sections = _absorb_envelope_passthrough_chain(sections)
     sections = _absorb_single_envelope_header(sections)
     sections = _absorb_repeating_page_markers(sections)
+    sections = _absorb_repeated_title_headers(sections)
 
     # Structural L0 fallback: promote the first non-envelope in-scope
     # record with body text to level 0 before title-fragment merging,

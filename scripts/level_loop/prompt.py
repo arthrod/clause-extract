@@ -481,6 +481,17 @@ is stale and any regress signal you read is a phantom.
 - Never edit files under `data/auto_parse/level_freeze/frozen/` by
   hand.
 - Never call `freeze.py --force`. Only humans force.
+- **DO NOT ASK QUESTIONS.** This is a fully autonomous dispatch — there
+  is no human to answer. When you face a judgment call, make the most
+  pragmatic choice that lets the rubric pass and the freeze advance,
+  and document your reasoning in the commit message and/or attempt
+  notes. Asking and exiting wastes a dispatch slot.
+- **doc2dict text-loss fallback.** If doc2dict has dropped content
+  the rubric expects (title/preamble missing, content past page-break
+  HRs gone, etc.), accept what is available: promote the first
+  available section as L0 and freeze. Note the truncation in your
+  commit message. Do NOT block on this — it is a known limitation
+  and downstream tooling will surface incomplete spans.
 - If you cannot make the rubric pass without breaking a frozen idx,
   STOP, print one line of WHY, and exit. The driver will retry with
   a fresh dispatch (with your failure recorded in attempt history).
@@ -489,9 +500,11 @@ is stale and any regress signal you read is a phantom.
 - **ONE ADVANCE PER DISPATCH.** After `advance.py` succeeds for
   idx={current_idx}, EXIT. Do NOT loop into another idx. The driver
   is responsible for the next idx; the agent's scope is exactly one.
-- **NEVER call freeze.py or advance.py twice in one dispatch.** If
-  you somehow find yourself looking at idx={current_idx}+1 after a
-  successful advance, that means you should be DONE — stop now.
+- `freeze.py` may be retried within the same dispatch after fixing a
+  rejection (re-run the parser first, then re-call freeze). Do NOT
+  pass `--force`. Never call `advance.py` twice. If you find yourself
+  looking at idx={current_idx}+1 after a successful advance, you are
+  DONE — stop now.
 """
 
 

@@ -858,6 +858,95 @@ def _absorb_single_envelope_header(rows: list[dict[str, Any]]) -> list[dict[str,
     return rows
 
 
+def _merge_title_fragments(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge consecutive empty-body title-fragment siblings into the L0 record.
+
+    Some SEC filings split the agreement title across multiple HTML divs
+    (e.g. "SECOND AMENDMENT" / "TO THE" / "FOREST CITY REALTY TRUST, INC."
+    / "1994 STOCK PLAN" as four separate sections).  Each fragment becomes
+    a separate "predicted header" node with no body text.
+
+    This function detects that pattern: if the L0 record has preceding
+    siblings (same parent) that are all empty-body "predicted header"
+    nodes, their titles are merged into the L0 record's title and the
+    fragments are marked is_envelope=True so they drop from the JSONL.
+
+    The merge only fires when ALL of:
+      1. There is exactly one L0 record.
+      2. The L0 record's preceding siblings (same parent) are ALL
+         empty-body "predicted header" nodes.
+      3. At least one such fragment exists.
+    """
+    by_node_id = {r["node_id"]: r for r in rows}
+    children_of: dict[int | None, list[dict[str, Any]]] = {}
+    for r in rows:
+        children_of.setdefault(r.get("parent_node_id"), []).append(r)
+
+    # Find the L0 record (first non-envelope, non-trailer with depth 0)
+    l0: dict[str, Any] | None = None
+    for r in rows:
+        if r.get("depth") == 0 and not r.get("is_envelope") and r.get("scope") != "trailer":
+            l0 = r
+            break
+    if l0 is None:
+        return rows
+
+    # Collect preceding siblings of the L0 record
+    parent_id = l0.get("parent_node_id")
+    siblings = children_of.get(parent_id, [])
+    fragments: list[dict[str, Any]] = []
+    for sib in siblings:
+        if sib["node_id"] == l0["node_id"]:
+            break
+        fragments.append(sib)
+
+    if not fragments:
+        return rows
+
+    # All fragments must be empty-body "predicted header" nodes
+    for frag in fragments:
+        if frag.get("body_direct_chars", 0) > 0:
+            return rows
+        if (frag.get("cls") or "") != "predicted header":
+            return rows
+        if frag.get("is_envelope"):
+            return rows
+
+    # Merge: combine fragment titles + L0 title into L0's title
+    merged_parts = [frag.get("title", "").strip() for frag in fragments]
+    merged_parts.append(l0.get("title", "").strip())
+    merged_title = " ".join(part for part in merged_parts if part)
+
+    # Guard: only accept the merge if the combined title looks like a
+    # complete agreement/amendment/plan title.  This prevents merging
+    # unrelated preamble items (company names, "TABLE OF CONTENTS") into
+    # a title that is already complete on its own.
+    _ORDINAL_AMENDMENT_START_RE = re.compile(
+        r"^(?:FIRST|SECOND|THIRD|FOURTH|FIFTH|SIXTH|SEVENTH|EIGHTH|NINTH|TENTH)"
+        r"\s+AMENDMENT\b",
+        re.IGNORECASE,
+    )
+    _TITLE_START_RE = re.compile(
+        r"^(?:AMENDMENT|AGREEMENT|PLAN|LICENSE|CONTRACT|INDENTURE|LEASE|LOAN|CREDIT|PURCHASE|SALE|SUPPLY|OPTION|WARRANT|NOTE|GUARANTEE|EMPLOYMENT|SEVERANCE|RETENTION|RESTRICTED|STOCK|INCENTIVE|BONUS|DEFERRED|COMPENSATION|PENSION|TRUST|SETTLEMENT|RELEASE|WAIVER|CONSENT|AMENDMENT|MODIFICATION|SUPPLEMENT|RATIFICATION|RESTATEMENT|TERMINATION|ASSIGNMENT|DELEGATION|NOVELATION|ASSUMPTION|SUBORDINATION|NONCOMPETITION|NONSOLICITATION|CONFIDENTIALITY|PROPRIETARY|INFORMATION|TRANSFER|CHANGE\s+OF\s+CONTROL|SHAREHOLDER|STOCKHOLDER|REGISTRATION|RIGHTS|COVENANT|VOTING|IRREVOCABLE|PROXY|POWER\s+OF\s+ATTORNEY|NOTICE|MEMORANDUM|LETTER|SIDE\s+LETTER|FEE\s+LETTER|COMMITMENT|TERM\s+SHEET)",
+        re.IGNORECASE,
+    )
+    l0_title_stripped = (l0.get("title") or "").strip()
+    # If L0 title already starts with a document-type keyword, it's complete
+    if _TITLE_START_RE.match(l0_title_stripped):
+        return rows
+    # If merged title starts with an ordinal amendment pattern, accept
+    if not _ORDINAL_AMENDMENT_START_RE.match(merged_title):
+        return rows
+
+    l0["title"] = merged_title
+
+    # Mark fragments as envelope so they drop from JSONL
+    for frag in fragments:
+        frag["is_envelope"] = True
+
+    return rows
+
+
 def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     size_kb = round(len(raw) / 1024, 2)
     base: dict[str, Any] = {
@@ -898,6 +987,7 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
     sections = _fix_post_signature_envelope(sections)
     sections = _apply_scope_rule(sections)
     sections = _absorb_single_envelope_header(sections)
+    sections = _merge_title_fragments(sections)
 
     # Structural L0 fallback: if no title matched the AGREEMENT/PLAN
     # pattern (e.g. guarantee letters, side letters), promote the first

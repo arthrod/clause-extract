@@ -1,5 +1,5 @@
 {
-  "current_idx": 48,
+  "current_idx": 49,
   "frozen": [
     0,
     1,
@@ -48,7 +48,8 @@
     44,
     45,
     46,
-    47
+    47,
+    48
   ],
   "history": [
     {
@@ -717,6 +718,24 @@
       "action": "advance",
       "from_idx": 47,
       "to_idx": 48
+    },
+    {
+      "ts": "2026-05-10T05:02:19",
+      "action": "freeze",
+      "idx": 48,
+      "n_records": 6
+    },
+    {
+      "ts": "2026-05-10T05:03:45",
+      "action": "freeze",
+      "idx": 48,
+      "n_records": 6
+    },
+    {
+      "ts": "2026-05-10T05:03:45",
+      "action": "advance",
+      "from_idx": 48,
+      "to_idx": 49
     }
   ]
 }

@@ -1,5 +1,5 @@
 {
-  "current_idx": 61,
+  "current_idx": 64,
   "frozen": [
     0,
     1,
@@ -61,7 +61,10 @@
     57,
     58,
     59,
-    60
+    60,
+    61,
+    62,
+    63
   ],
   "history": [
     {
@@ -892,6 +895,48 @@
       "action": "advance",
       "from_idx": 60,
       "to_idx": 61
+    },
+    {
+      "ts": "2026-05-10T06:37:24",
+      "action": "freeze",
+      "idx": 61,
+      "n_records": 128
+    },
+    {
+      "ts": "2026-05-10T06:37:25",
+      "action": "advance",
+      "from_idx": 61,
+      "to_idx": 62
+    },
+    {
+      "ts": "2026-05-10T06:43:23",
+      "action": "freeze",
+      "idx": 62,
+      "n_records": 59
+    },
+    {
+      "ts": "2026-05-10T06:43:38",
+      "action": "freeze",
+      "idx": 62,
+      "n_records": 59
+    },
+    {
+      "ts": "2026-05-10T06:43:39",
+      "action": "advance",
+      "from_idx": 62,
+      "to_idx": 63
+    },
+    {
+      "ts": "2026-05-10T06:48:04",
+      "action": "freeze",
+      "idx": 63,
+      "n_records": 193
+    },
+    {
+      "ts": "2026-05-10T06:48:26",
+      "action": "advance",
+      "from_idx": 63,
+      "to_idx": 64
     }
   ]
 }

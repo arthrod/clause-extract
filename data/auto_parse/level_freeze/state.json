@@ -1,5 +1,5 @@
 {
-  "current_idx": 33,
+  "current_idx": 35,
   "frozen": [
     0,
     1,
@@ -33,7 +33,9 @@
     29,
     30,
     31,
-    32
+    32,
+    33,
+    34
   ],
   "history": [
     {
@@ -498,6 +500,48 @@
       "idx": 27,
       "n_records": 26,
       "note": "Redo of idx=27 after body-splitter parser pass (in-text structural-marker decomposition). Previous freeze was a single mega-record because doc2dict collapsed the body into one node; new parser splits inline by 1./numbered, (a)/lettered, (i)/roman markers. regress.py passes for all 33 frozen idxs."
+    },
+    {
+      "ts": "2026-05-10T00:56:05",
+      "action": "freeze",
+      "idx": 33,
+      "n_records": 14
+    },
+    {
+      "ts": "2026-05-10T00:56:22",
+      "action": "advance",
+      "from_idx": 33,
+      "to_idx": 34
+    },
+    {
+      "ts": "2026-05-10T02:24:14",
+      "action": "freeze",
+      "idx": 15,
+      "n_records": 24
+    },
+    {
+      "ts": "2026-05-10T02:24:14",
+      "action": "freeze",
+      "idx": 23,
+      "n_records": 24
+    },
+    {
+      "ts": "2026-05-10T02:24:14",
+      "action": "freeze",
+      "idx": 33,
+      "n_records": 22
+    },
+    {
+      "ts": "2026-05-10T02:30:57",
+      "action": "freeze",
+      "idx": 34,
+      "n_records": 55
+    },
+    {
+      "ts": "2026-05-10T02:31:10",
+      "action": "advance",
+      "from_idx": 34,
+      "to_idx": 35
     }
   ]
 }

@@ -601,7 +601,6 @@ def walk_sections(
     subdoc_penalty: int = 0,
     envelope_seen: list[bool] | None = None,
     l0_seen: list[bool] | None = None,
-    parent_is_envelope: bool = False,
 ) -> list[dict[str, Any]]:
     """Walk doc2dict's section tree and emit flat row records.
 
@@ -709,7 +708,7 @@ def walk_sections(
         # Penalty bumps for descendants only when this section is a REAL
         # subdocument (subdoc class AND not the envelope).
         child_penalty = subdoc_penalty + (
-            1 if ((cls or "") in _SUBDOC_CLASSES and not is_envelope) or (is_secondary_agreement and not parent_is_envelope) else 0
+            1 if ((cls or "") in _SUBDOC_CLASSES and not is_envelope) or is_secondary_agreement else 0
         )
         if isinstance(contents, dict):
             child_sections = {k: v for k, v in contents.items() if _is_section_node(v)}
@@ -823,6 +822,41 @@ def _fix_post_signature_envelope(rows: list[dict[str, Any]]) -> list[dict[str, A
     return rows
 
 
+def _absorb_single_envelope_header(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Absorb subdoc-envelope's lone empty-body child when its title
+    matches no structural level pattern.  Prevents SEC filing metadata
+    headers from appearing as real content."""
+    by_node_id = {r["node_id"]: r for r in rows}
+    children_of: dict[int | None, list[dict[str, Any]]] = {}
+    for r in rows:
+        children_of.setdefault(r.get("parent_node_id"), []).append(r)
+
+    envelope_rows = [r for r in rows if r.get("is_envelope")]
+    for env_row in envelope_rows:
+        env_cls = env_row.get("cls") or ""
+        if env_cls not in _SUBDOC_CLASSES:
+            continue
+        env_id = env_row["node_id"]
+        kids = children_of.get(env_id, [])
+        real_kids = [
+            k for k in kids
+            if not k.get("is_envelope") and k.get("scope") != "trailer"
+        ]
+        if len(real_kids) != 1:
+            continue
+        child = real_kids[0]
+        if child.get("body_direct_chars", 0) > 0:
+            continue
+        stripped = (child.get("title") or "").strip()
+        if stripped:
+            matched = any(pat.match(stripped) for pat, _level in _STRUCTURAL_LEVELS)
+            if matched:
+                continue
+        child["is_envelope"] = True
+
+    return rows
+
+
 def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     size_kb = round(len(raw) / 1024, 2)
     base: dict[str, Any] = {
@@ -862,6 +896,19 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
     sections = walk_sections(document_tree, depth=0)
     sections = _fix_post_signature_envelope(sections)
     sections = _apply_scope_rule(sections)
+    sections = _absorb_single_envelope_header(sections)
+
+    # Structural L0 fallback: if no title matched the AGREEMENT/PLAN
+    # pattern (e.g. guarantee letters, side letters), promote the first
+    # non-envelope in-scope record with body text to level 0.
+    has_l0 = any(s["depth"] == 0 and not s.get("is_envelope") for s in sections)
+    if not has_l0:
+        for s in sections:
+            if s.get("is_envelope") or s.get("scope") == "trailer":
+                continue
+            if s.get("body_direct_chars", 0) > 0:
+                s["depth"] = 0
+                break
 
     base["parse_status"] = "ok"
     base["n_section_nodes"] = len(sections)

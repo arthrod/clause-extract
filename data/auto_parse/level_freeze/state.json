@@ -1,5 +1,5 @@
 {
-  "current_idx": 34,
+  "current_idx": 35,
   "frozen": [
     0,
     1,
@@ -34,7 +34,8 @@
     30,
     31,
     32,
-    33
+    33,
+    34
   ],
   "history": [
     {
@@ -511,6 +512,36 @@
       "action": "advance",
       "from_idx": 33,
       "to_idx": 34
+    },
+    {
+      "ts": "2026-05-10T02:24:14",
+      "action": "freeze",
+      "idx": 15,
+      "n_records": 24
+    },
+    {
+      "ts": "2026-05-10T02:24:14",
+      "action": "freeze",
+      "idx": 23,
+      "n_records": 24
+    },
+    {
+      "ts": "2026-05-10T02:24:14",
+      "action": "freeze",
+      "idx": 33,
+      "n_records": 22
+    },
+    {
+      "ts": "2026-05-10T02:30:57",
+      "action": "freeze",
+      "idx": 34,
+      "n_records": 55
+    },
+    {
+      "ts": "2026-05-10T02:31:10",
+      "action": "advance",
+      "from_idx": 34,
+      "to_idx": 35
     }
   ]
 }

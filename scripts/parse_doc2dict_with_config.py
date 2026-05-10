@@ -1480,6 +1480,25 @@ _FLAT_SECTION_MARKER_RE = re.compile(
     r")"
 )
 
+_PAGE_NUMBER_TITLE_RE = re.compile(r"^\s*-+\s*\d+\s*-+\s*$")
+_NOISE_CONNECTIVE_RE = re.compile(
+    r"^\s*(?:AND|OR|BY|TO|FROM|FOR|IN|AT|ON|OF|WITH)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_noise_child(node: dict[str, Any]) -> bool:
+    """Return True if a child node is structurally noise (page number,
+    single-word connective, etc.) rather than a real section heading."""
+    title = (node.get("title") or "").strip()
+    if not title:
+        return False
+    if _PAGE_NUMBER_TITLE_RE.match(title):
+        return True
+    if _NOISE_CONNECTIVE_RE.match(title):
+        return True
+    return False
+
 
 def _infer_level_from_split_title(title: str) -> int:
     if not title:
@@ -1510,9 +1529,19 @@ def _split_flat_body_into_sections(rows: list[dict[str, Any]]) -> list[dict[str,
 
     l0_id = l0["node_id"]
     kids = children_of.get(l0_id, [])
+    # A child counts as "real" only if it isn't an envelope, isn't a
+    # trailer, and isn't structural noise (page numbers, single-word
+    # connectives). The Separation Agreement template attaches all the
+    # numbered sections as inline body of the L0 "AGREEMENT" node, while
+    # the doc2dict tree decoration produces page-number children
+    # ("- 2 -", "- 3 -", ...) that hold continuation body but no real
+    # heading content. Treat those as flat-equivalent so the splitter
+    # fires.
     real_kids = [
         k for k in kids
-        if not k.get("is_envelope") and k.get("scope") != "trailer"
+        if not k.get("is_envelope")
+        and k.get("scope") != "trailer"
+        and not _is_noise_child(k)
     ]
     if real_kids:
         return rows

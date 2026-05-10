@@ -82,8 +82,9 @@ from doc2dict.mapping_dicts.standard_config import STANDARD_CONFIG
 #    titles like "ARTICLE III – ORDER\nPLACEMENT" are accepted; in
 #    Python's default re, `.` does not match `\n`.
 _LOOKAHEAD = r"(?![\d,])"
-_TRAILING = r"(?:[\s\:\-–—]+[\s\S]{0,500})?\s*"
+_TRAILING = r"(?:[\s\:\-–—]+[\s\S]{0,500})?\s*$"
 
+# Level 0 — Article (agreement-level divisions)
 LEVEL_0_PATTERNS = [
     {
         "name": "article",
@@ -96,6 +97,16 @@ LEVEL_0_PATTERNS = [
             + _LOOKAHEAD + r"\.?" + _TRAILING + r"$"
         ),
     },
+]
+
+# Level 1 — Exhibit/Schedule/Appendix/Annex (party/exhibit metadata) + Section.
+#
+# According to the rubric, Level 1 contains:
+# - Party/exhibit metadata (e.g., "EXHIBIT 10.25", "ULURU Inc.")
+# - WITNESSETH/WHEREAS recitals (captured as unstructured)
+# - Signature block (captured as unstructured)
+# - Numbered Sections (moved from Level 1 per rubric)
+LEVEL_1_PATTERNS = [
     {
         "name": "exhibit",
         "regex": r"^exhibit\s+([a-z0-9][a-z0-9\-\.]*)" + _LOOKAHEAD + r"\.?" + _TRAILING + r"$",
@@ -112,15 +123,6 @@ LEVEL_0_PATTERNS = [
         "name": "annex",
         "regex": r"^annex\s+([a-z0-9][a-z0-9\-\.]*)" + _LOOKAHEAD + r"\.?" + _TRAILING + r"$",
     },
-]
-
-# Level 1 — Section.
-#
-# Captures "Section 1", "Section 1.1", "Section 1.1.1", with optional
-# trailing dot, dash, or colon. Section numbers must be numeric;
-# "Section A" or "Section One" patterns are uncommon in modern agreements
-# and would create more noise than signal.
-LEVEL_1_PATTERNS = [
     {
         "name": "section",
         "regex": r"^section\s+(\d+(?:\.\d+)*)" + _LOOKAHEAD + r"\.?" + _TRAILING + r"$",

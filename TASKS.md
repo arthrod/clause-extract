@@ -4,7 +4,13 @@ This is the implementation work plan for `clause-extract`. Each section is a pha
 
 If you find yourself disagreeing with a locked decision, open a PR that updates `docs/DECISIONS.md` with the rationale before changing behavior. Do not silently diverge.
 
-If you find yourself wanting to add classification (clause-type labels, embeddings, retrieval features), STOP. **This is a parsing project.** The output is structured text with hierarchy. Categorization, retrieval, and statistics are downstream and out of scope. See `docs/HANDOFF.md` if this is unclear.
+## The immediate goal — keep it in mind across every phase
+
+> Slice each agreement's HTML into clauses with hierarchy — text + nesting depth — so that concatenating the slices in document order reconstructs the document faithfully.
+
+That's the bar. Phase 1 makes the parsers meet it; Phase 2+ build canonical records on top of parsers that already pass.
+
+If you find yourself wanting to add classification (clause-type labels, embeddings, retrieval features), STOP. **This is a parsing project.** The output is structured text with hierarchy. Categorization, retrieval, and statistics are downstream and out of scope. See [`docs/HANDOFF.md`](docs/HANDOFF.md) if this is unclear.
 
 ---
 
@@ -19,11 +25,53 @@ Before opening any other phase, get the environment working.
 
 Acceptance: all four commands succeed.
 
-If any test fails on phase 0, **the test is wrong before you change production code is wrong**. Check fixtures, the `HF_TOKEN` env var, and dependency pins. The artifacts were validated locally before commit; reproducing that state is your bar.
+If any test fails on phase 0, **the test is wrong before you change production code**. Check fixtures, the `HF_TOKEN` env var, and dependency pins. The artifacts were validated locally before commit; reproducing that state is your bar.
 
 ---
 
-## Phase 1 — Subdocument detector + corpus-scale verification
+## Phase 1 — Parser reconstruction quality (the immediate goal)
+
+Push every parser's mean word coverage on the corpus above the bar. This is the work that must clear before any canonical-record machinery gets built. The success criterion is measurable, deterministic, and re-runnable: `measure_reconstruction.py` produces the parquet that says whether you're done.
+
+### Bar
+
+- **Mean word coverage ≥ 95%** across all ok-status docs in the corpus.
+- **No doc below 80%** word coverage. Outliers below this are systematic parser failures, not noise — they need to be triaged before declaring the phase done.
+- **Truncation off** for the gate run (`--no-truncate` on every parser).
+
+### Workflow
+
+1. Run all four parsers at corpus scale with `--no-truncate`:
+   ```bash
+   HF_TOKEN=hf_xxx uv run scripts/parse_source_of_truth.py     --output-dir data/runs/source_of_truth
+   HF_TOKEN=hf_xxx uv run scripts/parse_doc2dict_baseline.py    --output-dir data/runs/doc2dict_baseline    --no-truncate
+   HF_TOKEN=hf_xxx uv run scripts/parse_doc2dict_with_config.py --output-dir data/runs/doc2dict_with_config --no-truncate
+   HF_TOKEN=hf_xxx uv run scripts/parse_lexnlp.py               --output-dir data/runs/lexnlp_baseline      --no-truncate
+   ```
+
+2. Run `scripts/measure_reconstruction.py`. Inspect `reconstruction_summary.parquet`. Sort by each parser's `*_word_coverage_pct` ascending — the top-of-list rows are the docs that parser struggles on most.
+
+3. For each struggling doc, open the source HTML AND the parser JSONL side by side. Identify the structural pattern that's being missed (table cells, nested mixed content, footer text, etc.).
+
+4. Make a TARGETED fix to the parser's body extraction. For doc2dict that probably means relaxing `_collect_direct_text` to handle text inside child structures that don't pass `_is_text_leaf`. For lexnlp, the gap is usually whitespace handling at section boundaries.
+
+5. Re-run the four-parser sequence above and re-measure. Repeat until the bar clears.
+
+### Don't
+
+- Don't change `_truncate_for_jsonl` to "fix" reconstruction by lengthening the cap. Use `--no-truncate` instead. Truncation is the inspection format; uncapped JSONL is the measurement format.
+- Don't add post-processing that reads the source-of-truth and patches missing content into parser output. That defeats the measurement.
+- Don't lower the bar without evidence that 95% is unreachable for a structural reason. If you think it is, document the corpus pathology in [`docs/DECISIONS.md`](docs/DECISIONS.md) and propose a revised bar with a PR.
+
+### Acceptance
+
+- [ ] `measure_reconstruction.py` headline shows mean word coverage ≥ 95% for `d2d_baseline`, `d2d_config`, AND `lex` across all ok docs.
+- [ ] Zero docs in `reconstruction_summary.parquet` have `min_word_coverage_pct < 80`.
+- [ ] Findings documented in `docs/IMPLEMENTATION_NOTES.md`: which structural patterns each parser was missing, what fix you applied, what the post-fix numbers are.
+
+---
+
+## Phase 2 — Subdocument detector + corpus-scale verification
 
 Build the v1 detector exactly as specified in `docs/DETECTOR.md`. Validate against the hand-verified 100-doc sample, then run across the full corpus and spot-check.
 
@@ -47,11 +95,11 @@ Build the v1 detector exactly as specified in `docs/DETECTOR.md`. Validate again
 - [ ] `tests/test_subdoc_detector_100sample.py` — runs the detector against the 100-doc fixture, asserts ≥80% precision AND ≥85% recall against the ground truth.
 - [ ] `scripts/run_subdoc_detector_full_corpus.py` — runs the detector across all 1066 docs, writes `data/runs/subdoc_full_corpus.json` with per-doc verdicts and candidate lists.
 
-### Validation gate (gate 2 from `docs/HANDOFF.md`)
+### Validation gate (gate 3 from `docs/HANDOFF.md`)
 
 `uv run pytest tests/test_subdoc_detector_100sample.py` reports ≥80% P / ≥85% R.
 
-### Spot-check before approving for phase 2
+### Spot-check before approving for phase 3
 
 After running the full-corpus script, hand-pick 5–10 random docs flagged `multi_subdoc_v1` and verify by reading source HTML that they're real multi-subdoc agreements. Document the spot-check in `data/runs/subdoc_spotcheck_notes.md`. If precision on the spot-check holds at ≥75%, the detector is approved for phase 2.
 
@@ -62,9 +110,11 @@ After running the full-corpus script, hand-pick 5–10 random docs flagged `mult
 
 ---
 
-## Phase 2 — Canonicalizer (single-doc)
+## Phase 3 — Canonicalizer (single-doc)
 
 Build `src/clause_extract/canonicalizer.py` plus the pydantic schema models. Goal: given dd_nodes + lx_spans + subdoc verdict for one doc, produce a list of canonical clause records matching `docs/SCHEMA.md`.
+
+> **Pre-condition for this phase:** Phase 1 has already verified that doc2dict's `body_direct` carries the document's content faithfully. Phase 3 builds on that — taking the parser output and structuring it into canonical records. If Phase 1's bar isn't met, fix that first.
 
 ### Artifacts to produce
 
@@ -120,7 +170,7 @@ Build `src/clause_extract/canonicalizer.py` plus the pydantic schema models. Goa
 
 ---
 
-## Phase 3 — End-to-end pipeline + CLI
+## Phase 4 — End-to-end pipeline + CLI
 
 Wire the canonicalizer into a full-corpus pipeline driven by typer.
 
@@ -145,7 +195,7 @@ Wire the canonicalizer into a full-corpus pipeline driven by typer.
   - `canonicalize --doc-idx N` — single doc, prints/writes canonical record.
   - `canonicalize --corpus full [--limit N] [--output PATH] [--push-to-hub]` — full run.
   - `detect-subdocs [--limit N] [--output PATH]` — runs detector only, useful for spot-checks.
-  - `validate-sot` — runs validation gate 1 against the SOT.
+  - `validate-sot` — runs validation gate 2 against the SOT.
 
 ### Tests
 
@@ -162,11 +212,11 @@ Wire the canonicalizer into a full-corpus pipeline driven by typer.
 
 ### Don't
 
-- Don't push to HF in Phase 3. `--push-to-hub` exists but is not exercised until phase 4.
+- Don't push to HF in Phase 4. `--push-to-hub` exists but is not exercised until phase 5.
 
 ---
 
-## Phase 4 — HF dataset push
+## Phase 5 — HF dataset push
 
 Push the canonicalized output to `arthrod/clause-prob-canonical` (HF, private dataset repo).
 
@@ -184,24 +234,25 @@ Push the canonicalized output to `arthrod/clause-prob-canonical` (HF, private da
 
 ---
 
-## Phase 5 — Validation runs against the gates
+## Phase 6 — Validation runs against the gates
 
 Final pass before review.
 
-### Validation gates (re-run; all three must pass)
+### Validation gates (re-run; all four must pass)
 
-- [ ] **Gate 1**: `uv run pytest tests/test_canonical_id_parser_sot.py -m sot` — 100% pass on 973 SOT clauses.
-- [ ] **Gate 2**: `uv run pytest tests/test_subdoc_detector_100sample.py` — ≥80% precision AND ≥85% recall on the 100-doc hand-verified sample.
-- [ ] **Gate 3**: end-to-end run completes. `uv run clause-extract canonicalize --corpus full --output data/runs/final.parquet` produces a deterministic dataset; running it twice produces byte-identical output (sort by `corpus_idx`, normalize JSON whitespace, then diff).
+- [ ] **Gate 1 — reconstruction quality**: `uv run scripts/measure_reconstruction.py` shows mean word coverage ≥95% per parser, no doc below 80%, truncation off (`--no-truncate`).
+- [ ] **Gate 2 — canonical-ID parser**: `uv run pytest tests/test_canonical_id_parser_sot.py -m sot` — 100% pass on 973 SOT clauses.
+- [ ] **Gate 3 — subdoc detector**: `uv run pytest tests/test_subdoc_detector_100sample.py` — ≥80% precision AND ≥85% recall on the 100-doc hand-verified sample.
+- [ ] **Gate 4 — end-to-end determinism**: `uv run clause-extract canonicalize --corpus full --output data/runs/final.parquet` produces a deterministic dataset; running it twice produces byte-identical output (sort by `corpus_idx`, normalize JSON whitespace, then diff).
 
 ### Documentation update
 
 - [ ] If implementation diverged from any spec, update the relevant `docs/*.md` file in the same PR. State the rationale in the PR description.
-- [ ] Add a `docs/IMPLEMENTATION_NOTES.md` capturing decisions made during phases 1–4 that weren't pre-specified — e.g. caching strategy, phantom-parent pattern set, body-reconciliation thresholds.
+- [ ] Add a `docs/IMPLEMENTATION_NOTES.md` capturing decisions made during phases 1–5 that weren't pre-specified — e.g. body-extraction patches you applied, caching strategy, phantom-parent pattern set, body-reconciliation thresholds.
 
 ### Acceptance
 
-- [ ] All three validation gates pass.
+- [ ] All four validation gates pass.
 - [ ] All test files pass without `-m sot` skips when `HF_TOKEN` is set.
 - [ ] Coverage targets met:
   - ≥80% line / ≥70% branch baseline across `src/clause_extract/`.

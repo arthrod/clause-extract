@@ -4,6 +4,8 @@ The subdocument detector is the gate that decides whether a document gets synthe
 
 This document specifies the algorithm, its validation against a hand-verified 100-doc sample, and known failure patterns.
 
+> **Pre-condition.** The detector reads doc2dict's output. If doc2dict isn't reconstructing the source faithfully (the immediate parsing goal — see [`GOAL.md`](GOAL.md)), the detector's input is unreliable and its precision/recall numbers won't generalize. This work is downstream of Phase 1 in [`../TASKS.md`](../TASKS.md). Detector tuning before parser quality is solved is wasted motion.
+
 ---
 
 ## What we're trying to detect

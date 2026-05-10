@@ -4,6 +4,8 @@ This document specifies the canonical clause-record schema produced by `clause-e
 
 The schema is **locked** as of repo creation. Changes require a PR with the rationale documented in `docs/DECISIONS.md`.
 
+> **Where this fits relative to the immediate goal.** The parser scripts (`scripts/parse_*.py`) currently emit a minimal **3-key JSONL** — `{idx, level, span}` — directly from each parser's output. That's the inspection-and-measurement format used to verify the immediate parsing goal (concat-of-spans ≈ source document). The canonical schema described below is the **destination format** built on top of parser output once each parser meets the reconstruction-quality bar. Until that bar is cleared, the JSONL is what gets used; the canonical records described here are the next layer up.
+
 ---
 
 ## Top-level layout

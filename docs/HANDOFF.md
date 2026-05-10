@@ -1,10 +1,14 @@
 # Handoff to Claude Code
 
-You're picking up the implementation of `clause-extract`, a parser for SEC EX-10 exhibit agreements. The deliverable is a pipeline that extracts structured clause records — content, hierarchy, and document-level nuances — from each input document.
+You're picking up the implementation of `clause-extract`, a parser for SEC EX-10 exhibit agreements.
+
+> **The immediate goal of the parser:** slice each agreement's HTML into clauses with hierarchy — text + nesting depth — so that concatenating the slices in document order reconstructs the document faithfully.
+
+That's the criterion. Phase 1 in [`../TASKS.md`](../TASKS.md) is making each parser meet it; the rest of the pipeline (subdocument detection, canonicalization, HF dataset push) is built on top of parsers that already pass.
 
 **This is a parsing project, not classification.** The output is structured text with explicit hierarchical relationships. There are no model-derived labels, no clause-type taxonomy, no embeddings. Anyone who wants to categorize clauses by topic, build a retrieval index, or compute statistics builds those things on top of this dataset.
 
-Read [`README.md`](../README.md), [`docs/GOAL.md`](GOAL.md), [`docs/SCHEMA.md`](SCHEMA.md), [`docs/DECISIONS.md`](DECISIONS.md), and [`docs/DETECTOR.md`](DETECTOR.md) before starting. Issues track per-phase work with acceptance criteria.
+Read [`README.md`](../README.md), [`docs/GOAL.md`](GOAL.md), [`docs/SCHEMA.md`](SCHEMA.md), [`docs/DECISIONS.md`](DECISIONS.md), and [`docs/DETECTOR.md`](DETECTOR.md) before starting. [`../TASKS.md`](../TASKS.md) tracks per-phase work with acceptance criteria.
 
 ---
 
@@ -31,11 +35,12 @@ These were decided after measurement and discussion. If implementation reveals a
 - **CLI surface.** README sketches `clause-extract canonicalize`, `clause-extract detect-subdocs`. Use typer; subcommand layout is your call. Default destination should be local parquet under `data/runs/`; HF push is opt-in via `--push-to-hub`.
 - **Caching.** dd and lex parses are cheap but not instant. Cache them under `data/cache/<corpus_repo_short>/{idx}.json` so re-runs of the canonicalizer don't re-parse.
 
-## Validation gates (must pass before Phase 5 merge)
+## Validation gates (must pass before Phase 6 merge)
 
-1. **`canonical_id_parser` round-trips 973/973 SOT clauses.** `pytest tests/test_canonical_id_parser_sot.py -m sot` must report 100% pass. The harness fetches `arthrod/clause-prob-source-of-truth` and walks every clause_id in every ledger.
-2. **Subdocument detector matches hand-verified set on 100-doc sample at ≥80% precision and ≥85% recall.** `pytest tests/test_subdoc_detector_100sample.py` must report metrics meeting the threshold. The hand-verified ground truth is in `tests/fixtures/subdoc_100sample_ground_truth.json` (port from session artifacts in Phase 1).
-3. **End-to-end run on full corpus completes without errors** and writes a valid HF dataset. The CLI should expose this as `clause-extract canonicalize --corpus full --push-to-hub`. CI does not run this gate (too expensive); it's a manual check before merging Phase 5.
+1. **Reconstruction quality bar.** `scripts/measure_reconstruction.py` shows mean word coverage ≥ 95% per parser across the full corpus, no doc below 80%, with truncation off. See `DECISIONS.md` §10. This is the bar that admits a parser to feed the rest of the pipeline.
+2. **`canonical_id_parser` round-trips 973/973 SOT clauses.** `pytest tests/test_canonical_id_parser_sot.py -m sot` must report 100% pass. The harness fetches `arthrod/clause-prob-source-of-truth` and walks every clause_id in every ledger.
+3. **Subdocument detector matches hand-verified set on 100-doc sample at ≥80% precision and ≥85% recall.** `pytest tests/test_subdoc_detector_100sample.py` must report metrics meeting the threshold. The hand-verified ground truth is in `tests/fixtures/subdoc_100sample_ground_truth.json` (port from session artifacts in Phase 2).
+4. **End-to-end run on full corpus completes without errors** and writes a valid HF dataset. The CLI should expose this as `clause-extract canonicalize --corpus full --push-to-hub`. CI does not run this gate (too expensive); it's a manual check before merging Phase 6.
 
 ## What artifacts exist (do not rewrite from scratch)
 
@@ -51,25 +56,35 @@ These need to be built (in dependency order):
 
 | File | Phase | What it does |
 | --- | --- | --- |
-| `schema.py` | 2 | Pydantic models for canonical records, kinds, audit structs. |
-| `subdoc_detector.py` | 1 | Implements `DETECTOR.md` v1 algorithm. |
-| `canonicalizer.py` | 2 | Combines dd output + lex output + subdoc verdict + canonical_id_parser → canonical records for one document. |
-| `pipeline.py` | 3 | Orchestrates corpus pull → parse → post-process → write across the full corpus. |
-| `cli.py` | 3 | typer-based CLI. |
-| `hf_io.py` | 4 | Reads from `arthrod/new3_results_master22017_274.59mb`; writes to `arthrod/clause-prob-canonical`. |
+| `subdoc_detector.py` | 2 | Implements `DETECTOR.md` v1 algorithm. |
+| `schema.py` | 3 | Pydantic models for canonical records, kinds, audit structs. |
+| `canonicalizer.py` | 3 | Combines dd output + lex output + subdoc verdict + canonical_id_parser → canonical records for one document. |
+| `pipeline.py` | 4 | Orchestrates corpus pull → parse → post-process → write across the full corpus. |
+| `cli.py` | 4 | typer-based CLI. |
+| `hf_io.py` | 5 | Reads from `arthrod/new3_results_master22017_274.59mb`; writes to `arthrod/clause-prob-canonical`. |
 
 ## Implementation phases (one issue per phase)
 
-### Phase 1 — Subdocument detector + corpus-scale verification
+### Phase 1 — Parser reconstruction quality
+
+- Run all four parser scripts at corpus scale with `--no-truncate`.
+- Run `scripts/measure_reconstruction.py` to produce `reconstruction_summary.parquet`.
+- For each parser whose mean word coverage is < 95%, sort the parquet ascending by that parser's `*_word_coverage_pct` and inspect the worst docs.
+- Identify the structural pattern being missed (table cells, mixed-content children, footers, etc.) by reading the source HTML alongside the parser JSONL.
+- Make targeted fixes to the relevant parser's body extraction (most likely `_collect_direct_text` in the doc2dict scripts; whitespace handling in lex).
+- Re-run and re-measure until the bar (gate 1) clears.
+- Findings documented in `docs/IMPLEMENTATION_NOTES.md`.
+
+### Phase 2 — Subdocument detector + corpus-scale verification
 
 - Implement `subdoc_detector.py` per `DETECTOR.md`.
 - Port the 100-doc ground truth fixture from session artifacts.
-- Pass validation gate 2 against the 100-doc fixture.
+- Pass validation gate 3 against the 100-doc fixture.
 - Run the detector across the full 1066-doc corpus.
 - Hand-spot-check 5-10 random "flagged multi-subdoc" docs from the full corpus run.
-- If precision holds at ≥75% on the fresh spot-check, the detector is approved for Phase 2.
+- If precision holds at ≥75% on the fresh spot-check, the detector is approved for Phase 3.
 
-### Phase 2 — Post-processor scaffold (single doc)
+### Phase 3 — Canonicalizer (single doc)
 
 - Implement `schema.py` (pydantic models).
 - Implement `canonicalizer.py` for a single document. Given dd_nodes + lx_spans + subdoc_verdict, produce a list of canonical records.
@@ -77,22 +92,22 @@ These need to be built (in dependency order):
 - Phantom-parent collapsing implemented and recorded in `audit.phantom_collapsed_node_ids`.
 - Inline-enum folding implemented and recorded in `audit.lx_folded_span_ids`.
 
-### Phase 3 — End-to-end pipeline + CLI
+### Phase 4 — End-to-end pipeline + CLI
 
 - Implement `pipeline.py` orchestration.
 - Implement `cli.py` (typer subcommands).
 - Run end-to-end on the full 1066 docs locally, write to `data/runs/canonical/`.
 - All `parse_status` outcomes accounted for; no unhandled exceptions; runtime < 30 minutes on a single core.
 
-### Phase 4 — HF dataset push
+### Phase 5 — HF dataset push
 
 - Implement `hf_io.py` reader/writer.
 - Push to `arthrod/clause-prob-canonical` (private).
 - README quickstart commands work end-to-end.
 
-### Phase 5 — Validation runs against gates
+### Phase 6 — Validation runs against gates
 
-- All three validation gates pass.
+- All four validation gates pass.
 - Documentation updated where implementation diverged from spec (with rationale).
 - One PR for review.
 
@@ -123,7 +138,7 @@ For external dependencies in tests, prefer transport-level mocking (httpx MockTr
 These will probably surface during implementation:
 
 - **Image-only doc rate at full corpus scale.** Estimated 10-20% from pilot; needs measurement.
-- **`document_metadata.description` distribution.** Should be queried in Phase 1; see `DECISIONS.md` and `04_open_questions.md` (superseded but referenced) for what we want from it.
+- **`document_metadata.description` distribution.** Should be queried in Phase 2; see `DECISIONS.md` and `04_open_questions.md` (superseded but referenced) for what we want from it.
 - **Long-tail edge cases.** The 1066-doc corpus has plenty of weird stuff (Hebrew tenancy contracts, multi-jurisdiction equity grants, FAR pharma contracts). Don't try to handle every edge case — flag them in `audit` and let downstream consumers filter.
 - **Parser version drift.** `doc2dict>=0.7.1` and the vendored lexnlp regex are pinned. If a future doc2dict release changes parsing behavior, the canonical output will drift; we'd need a version-stamped dataset.
 

@@ -1,6 +1,8 @@
 # The goal
 
-> **Scope note.** This document is the project's goal-framing — written before the implementation scope was finalized. It mentions classification and statistical aggregation as eventual purposes the parsed corpus serves. Those purposes are explicitly **out of scope for this repo**. `clause-extract` produces structured parsed content with hierarchy and nuances. Anyone wanting to categorize, retrieve, or compute probabilities builds those layers separately. Read this document for context and motivation; read [`docs/SCHEMA.md`](SCHEMA.md) and [`docs/HANDOFF.md`](HANDOFF.md) for what to actually build.
+> **Immediate goal of the parser:** slice each agreement's HTML into clauses with hierarchy — text + nesting depth — so that concatenating the slices in document order reconstructs the document faithfully.
+>
+> That's the active criterion. The rest of this document is the long-form motivation: where this corpus comes from, what statistical use it eventually serves, and what "deterministic split" means in practice. Read it for context. The downstream uses (clause categorization, statistics, possible retrieval) are explicitly **out of scope for this repo** — they're built on top of a parser that already meets the immediate goal. Read [`SCHEMA.md`](SCHEMA.md) and [`HANDOFF.md`](HANDOFF.md) for what to build now; read this for why.
 
 ## What this is
 

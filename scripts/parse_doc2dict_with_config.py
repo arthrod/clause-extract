@@ -1063,7 +1063,7 @@ def _absorb_repeating_page_markers(rows: list[dict[str, Any]]) -> list[dict[str,
     text, and the continuation text ends up in its children.
 
     Criteria: a non-envelope "predicted header" node whose stripped
-    title appears 3+ times across the document AND has no body text is
+    title appears 2+ times across the document AND has no body text is
     a page-header artefact.  Absorb it (is_envelope=True) and merge
     any descendant body text into the nearest in-scope ancestor with
     body text (typically the grandparent numbered section).
@@ -1506,6 +1506,15 @@ def _infer_level_from_split_title(title: str) -> int:
     t = title.strip()
     if re.match(r"\d+\.", t):
         return 2
+    # `(i)`, `(v)`, `(x)` are ambiguous — they match BOTH the lettered
+    # `\([a-z]\)` pattern and the roman `\([ivx]+\)` pattern. Multi-char
+    # romans like `(ii)`, `(iii)`, `(iv)` are unambiguously roman, so
+    # they get level 4. Single-letter `(i)`, `(v)`, `(x)` are treated
+    # as lettered subsections (level 3) — this is the more common case
+    # in EX-10 contracts where `(a)..(l)` lists are typical and short
+    # roman sequences are rare.
+    if re.match(r"\([ivx][ivx]+\)", t):
+        return 4
     if re.match(r"\([a-z]\)", t):
         return 3
     if re.match(r"\([ivx]+\)", t):

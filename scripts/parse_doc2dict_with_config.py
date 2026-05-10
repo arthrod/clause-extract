@@ -1017,6 +1017,123 @@ def _absorb_page_header_exhibits(rows: list[dict[str, Any]]) -> list[dict[str, A
     return rows
 
 
+def _absorb_repeating_page_markers(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Absorb repeating empty-body "predicted header" nodes that are SEC
+    page-header artefacts (e.g. confidentiality-treatment identifiers,
+    "CSAPAGE N" markers that split section body across pages).
+
+    Some SEC filings insert the same page-header identifier (e.g.
+    "SAVARA-CONSULTANT") repeatedly throughout the document, splitting
+    each numbered section's body across multiple HTML divs.  Each
+    occurrence becomes a separate "predicted header" node with no body
+    text, and the continuation text ends up in its children.
+
+    Criteria: a non-envelope "predicted header" node whose stripped
+    title appears 3+ times across the document AND has no body text is
+    a page-header artefact.  Absorb it (is_envelope=True) and merge
+    any descendant body text into the nearest in-scope ancestor with
+    body text (typically the grandparent numbered section).
+    """
+    by_node_id = {r["node_id"]: r for r in rows}
+
+    # SEC page-marker pattern: uppercase identifiers with hyphens/dots,
+    # or "CSAPAGE N" / "PAGE N" page-number markers.
+    _SEC_MARKER_RE = re.compile(
+        r"^[A-Z][A-Z0-9.\-]{2,}[A-Z0-9]$"  # e.g. SAVARA-CONSULTANT (min 4 chars)
+        r"|^[A-Z]*PAGE\s+\d+$"               # e.g. CSAPAGE 1, PAGE 3
+        r"|^\[THE REMAINDER OF THIS PAGE"     # e.g. [THE REMAINDER OF THIS PAGE...
+        r"|^\[THE SIGNATURE PAGE"             # e.g. [THE SIGNATURE PAGE...
+        )
+
+    title_counts: Counter[str] = Counter()
+    for r in rows:
+        if r.get("is_envelope"):
+            continue
+        if (r.get("cls") or "") != "predicted header":
+            continue
+        if (r.get("body_direct_chars") or 0) > 0:
+            continue
+        title = (r.get("title") or "").strip()
+        if not title:
+            continue
+        if not _SEC_MARKER_RE.search(title):
+            continue
+        title_counts[title] += 1
+
+    repeating_titles = {t for t, c in title_counts.items() if c >= 2}
+    if not repeating_titles:
+        return rows
+
+    children_of: dict[int | None, list[dict[str, Any]]] = {}
+    for r in rows:
+        children_of.setdefault(r.get("parent_node_id"), []).append(r)
+
+    def _collect_subtree_body(nid: int) -> str:
+        parts: list[str] = []
+        node = by_node_id.get(nid)
+        if node is None:
+            return ""
+        body = (node.get("body_direct") or "").strip()
+        if body:
+            parts.append(body)
+        for ch in children_of.get(nid, []):
+            parts.append(_collect_subtree_body(ch["node_id"]))
+        return "\n".join(p for p in parts if p)
+
+    def _find_merge_ancestor(row: dict[str, Any]) -> dict[str, Any] | None:
+        cur_id = row.get("parent_node_id")
+        visited: set[int | None] = set()
+        while cur_id is not None and cur_id not in visited:
+            visited.add(cur_id)
+            parent = by_node_id.get(cur_id)
+            if parent is None:
+                break
+            if not parent.get("is_envelope") and (parent.get("body_direct_chars") or 0) > 0:
+                return parent
+            cur_id = parent.get("parent_node_id")
+        return None
+
+    absorbed: list[dict[str, Any]] = []
+    for r in rows:
+        if r.get("is_envelope"):
+            continue
+        title = (r.get("title") or "").strip()
+        if not title:
+            continue
+        if (r.get("cls") or "") != "predicted header":
+            continue
+        if (r.get("body_direct_chars") or 0) > 0:
+            continue
+        if title not in repeating_titles:
+            continue
+        r["is_envelope"] = True
+        absorbed.append(r)
+
+    if not absorbed:
+        return rows
+
+    for r in absorbed:
+        body = _collect_subtree_body(r["node_id"])
+        if not body:
+            continue
+        target = _find_merge_ancestor(r)
+        if target is not None:
+            existing = (target.get("body_direct") or "").rstrip()
+            target["body_direct"] = existing + "\n" + body if existing else body
+            target["body_direct_chars"] = len(target["body_direct"])
+
+    # Mark all descendants of absorbed nodes as envelope too
+    def _mark_descendants(nid: int) -> None:
+        for ch in children_of.get(nid, []):
+            ch["is_envelope"] = True
+            _mark_descendants(ch["node_id"])
+
+    for r in absorbed:
+        _mark_descendants(r["node_id"])
+
+    return rows
+
+
 def _find_body_merge_target(
     source: dict[str, Any], rows: list[dict[str, Any]]
 ) -> dict[str, Any] | None:
@@ -1275,6 +1392,7 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
     sections = _apply_scope_rule(sections)
     sections = _absorb_envelope_passthrough_chain(sections)
     sections = _absorb_single_envelope_header(sections)
+    sections = _absorb_repeating_page_markers(sections)
 
     # Structural L0 fallback: promote the first non-envelope in-scope
     # record with body text to level 0 before title-fragment merging,

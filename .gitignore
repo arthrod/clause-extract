@@ -62,3 +62,4 @@ data/local/
 *.log
 *.tmp
 .claude/
+data/auto_parse/parse_doc2dict_with_config_nodes.jsonl

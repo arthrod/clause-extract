@@ -1,5 +1,5 @@
 {
-  "current_idx": 14,
+  "current_idx": 35,
   "frozen": [
     0,
     1,
@@ -14,7 +14,28 @@
     10,
     11,
     12,
-    13
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32,
+    33,
+    34
   ],
   "history": [
     {
@@ -228,6 +249,299 @@
       "idx": 13,
       "n_records": 54,
       "note": "REFREEZE after promoting salvage parser (1143\u21921157 lines). The new parser adds l0_seen dedup (eliminates idx=13 second-L0-record rubric violation) AND subdoc-penalty descendant propagation. Two records shifted +1: 'FIRST AMENDMENT TO CREDIT AGREEMENT' L1\u2192L2, 'PROCEDURE FOR INITIAL TERM B LENDERS:' L2\u2192L3 \u2014 both inside Annex I and now rubrically correct (subdocs add +1 to descendants per rubric)."
+    },
+    {
+      "ts": "2026-05-09T18:32:04",
+      "action": "freeze",
+      "idx": 14,
+      "n_records": 330
+    },
+    {
+      "ts": "2026-05-09T18:32:16",
+      "action": "advance",
+      "from_idx": 14,
+      "to_idx": 15
+    },
+    {
+      "ts": "2026-05-09T20:44:26",
+      "action": "freeze",
+      "idx": 15,
+      "n_records": 14
+    },
+    {
+      "ts": "2026-05-09T20:44:38",
+      "action": "advance",
+      "from_idx": 15,
+      "to_idx": 16
+    },
+    {
+      "ts": "2026-05-09T21:21:03",
+      "action": "freeze",
+      "idx": 16,
+      "n_records": 4
+    },
+    {
+      "ts": "2026-05-09T21:21:08",
+      "action": "advance",
+      "from_idx": 16,
+      "to_idx": 17
+    },
+    {
+      "ts": "2026-05-09T21:24:15",
+      "action": "freeze",
+      "idx": 17,
+      "n_records": 54
+    },
+    {
+      "ts": "2026-05-09T21:24:25",
+      "action": "advance",
+      "from_idx": 17,
+      "to_idx": 18
+    },
+    {
+      "ts": "2026-05-09T21:28:12",
+      "action": "freeze",
+      "idx": 18,
+      "n_records": 22
+    },
+    {
+      "ts": "2026-05-09T21:28:25",
+      "action": "advance",
+      "from_idx": 18,
+      "to_idx": 19
+    },
+    {
+      "ts": "2026-05-09T21:31:28",
+      "action": "freeze",
+      "idx": 19,
+      "n_records": 68
+    },
+    {
+      "ts": "2026-05-09T21:31:34",
+      "action": "advance",
+      "from_idx": 19,
+      "to_idx": 20
+    },
+    {
+      "ts": "2026-05-09T21:42:44",
+      "action": "freeze",
+      "idx": 20,
+      "n_records": 28
+    },
+    {
+      "ts": "2026-05-09T21:42:58",
+      "action": "advance",
+      "from_idx": 20,
+      "to_idx": 21
+    },
+    {
+      "ts": "2026-05-09T21:50:43",
+      "action": "freeze",
+      "idx": 21,
+      "n_records": 2
+    },
+    {
+      "ts": "2026-05-09T21:50:50",
+      "action": "advance",
+      "from_idx": 21,
+      "to_idx": 22
+    },
+    {
+      "ts": "2026-05-09T21:56:31",
+      "action": "freeze",
+      "idx": 22,
+      "n_records": 13
+    },
+    {
+      "ts": "2026-05-09T21:56:37",
+      "action": "advance",
+      "from_idx": 22,
+      "to_idx": 23
+    },
+    {
+      "ts": "2026-05-09T21:59:40",
+      "action": "freeze",
+      "idx": 23,
+      "n_records": 14
+    },
+    {
+      "ts": "2026-05-09T21:59:46",
+      "action": "advance",
+      "from_idx": 23,
+      "to_idx": 24
+    },
+    {
+      "ts": "2026-05-09T22:40:32",
+      "action": "freeze",
+      "idx": 24,
+      "n_records": 12
+    },
+    {
+      "ts": "2026-05-09T22:41:00",
+      "action": "advance",
+      "from_idx": 24,
+      "to_idx": 25
+    },
+    {
+      "ts": "2026-05-09T22:43:07",
+      "action": "freeze",
+      "idx": 25,
+      "n_records": 17
+    },
+    {
+      "ts": "2026-05-09T22:43:14",
+      "action": "advance",
+      "from_idx": 25,
+      "to_idx": 26
+    },
+    {
+      "ts": "2026-05-09T22:45:11",
+      "action": "freeze",
+      "idx": 26,
+      "n_records": 65
+    },
+    {
+      "ts": "2026-05-09T22:45:22",
+      "action": "advance",
+      "from_idx": 26,
+      "to_idx": 27
+    },
+    {
+      "ts": "2026-05-09T23:30:39",
+      "action": "freeze",
+      "idx": 27,
+      "n_records": 1
+    },
+    {
+      "ts": "2026-05-09T23:30:45",
+      "action": "advance",
+      "from_idx": 27,
+      "to_idx": 28
+    },
+    {
+      "ts": "2026-05-09T23:35:37",
+      "action": "freeze",
+      "idx": 28,
+      "n_records": 15
+    },
+    {
+      "ts": "2026-05-09T23:35:51",
+      "action": "advance",
+      "from_idx": 28,
+      "to_idx": 29
+    },
+    {
+      "ts": "2026-05-09T23:48:34",
+      "action": "freeze",
+      "idx": 29,
+      "n_records": 21
+    },
+    {
+      "ts": "2026-05-09T23:48:41",
+      "action": "advance",
+      "from_idx": 29,
+      "to_idx": 30
+    },
+    {
+      "ts": "2026-05-09T23:51:12",
+      "action": "freeze",
+      "idx": 30,
+      "n_records": 2
+    },
+    {
+      "ts": "2026-05-09T23:51:19",
+      "action": "advance",
+      "from_idx": 30,
+      "to_idx": 31
+    },
+    {
+      "ts": "2026-05-09T23:57:42",
+      "action": "freeze",
+      "idx": 31,
+      "n_records": 16
+    },
+    {
+      "ts": "2026-05-09T23:57:49",
+      "action": "advance",
+      "from_idx": 31,
+      "to_idx": 32
+    },
+    {
+      "ts": "2026-05-10T00:04:35",
+      "action": "freeze",
+      "idx": 32,
+      "n_records": 14
+    },
+    {
+      "ts": "2026-05-10T00:07:34",
+      "action": "freeze",
+      "idx": 32,
+      "n_records": 14
+    },
+    {
+      "ts": "2026-05-10T00:08:09",
+      "action": "advance",
+      "from_idx": 32,
+      "to_idx": 33
+    },
+    {
+      "ts": "2026-05-10T00:09:33",
+      "action": "split_overshoot",
+      "note": "Agent overshot during idx=31 dispatch and froze both idx=31 AND idx=32. dispatch_and_pr.sh detected and exited cleanly. State rolled back here to reflect idx=31 freeze only; idx=32 will be committed on a separate stacked PR (loop/idx-32) with its own state.json mutation back up to current_idx=33."
+    },
+    {
+      "ts": "2026-05-10T00:10:28",
+      "action": "split_overshoot_part2",
+      "note": "idx=32 freeze committed on stacked branch loop/idx-32 after the idx=31 overshoot was split. State now reflects both idx=31 and idx=32 frozen; current_idx=33 is the next dispatch target."
+    },
+    {
+      "ts": "2026-05-10T01:18:21",
+      "action": "refreeze",
+      "idx": 27,
+      "n_records": 26,
+      "note": "Redo of idx=27 after body-splitter parser pass (in-text structural-marker decomposition). Previous freeze was a single mega-record because doc2dict collapsed the body into one node; new parser splits inline by 1./numbered, (a)/lettered, (i)/roman markers. regress.py passes for all 33 frozen idxs."
+    },
+    {
+      "ts": "2026-05-10T00:56:05",
+      "action": "freeze",
+      "idx": 33,
+      "n_records": 14
+    },
+    {
+      "ts": "2026-05-10T00:56:22",
+      "action": "advance",
+      "from_idx": 33,
+      "to_idx": 34
+    },
+    {
+      "ts": "2026-05-10T02:24:14",
+      "action": "freeze",
+      "idx": 15,
+      "n_records": 24
+    },
+    {
+      "ts": "2026-05-10T02:24:14",
+      "action": "freeze",
+      "idx": 23,
+      "n_records": 24
+    },
+    {
+      "ts": "2026-05-10T02:24:14",
+      "action": "freeze",
+      "idx": 33,
+      "n_records": 22
+    },
+    {
+      "ts": "2026-05-10T02:30:57",
+      "action": "freeze",
+      "idx": 34,
+      "n_records": 55
+    },
+    {
+      "ts": "2026-05-10T02:31:10",
+      "action": "advance",
+      "from_idx": 34,
+      "to_idx": 35
     }
   ]
 }

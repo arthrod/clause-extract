@@ -355,6 +355,36 @@ The loop is INCREMENTAL — keep changes targeted:
 - The current parser output above is what you start from. Read the
   level distribution and the offending records FIRST, then decide.
 
+## Critical workflow rule: re-run the parser after EVERY edit
+
+`regress.py` and `freeze.py` both read the canonical jsonl on disk
+at `{data_dir_abs}/parse_doc2dict_with_config_nodes.jsonl`. That file
+is **only refreshed when you run the parser**. If you edit the parser
+source and skip the parser run, regress.py will compare frozen
+baselines against the OLD jsonl from the previous parser run — giving
+phantom regressions that have nothing to do with your latest edit.
+
+**The single most common dispatch failure is reading stale jsonl after
+multiple edits.** It looks like this:
+
+```
+1. Edit parser (attempt 1)
+2. Run parser   ← jsonl refreshed
+3. Run regress  ← REGRESSION (real)
+4. Edit parser (attempt 2)
+5. Run regress  ← REGRESSION (FALSE — still reading attempt-1 jsonl)
+6. Edit parser (attempt 3)
+7. Run regress  ← REGRESSION (FALSE — still reading attempt-1 jsonl)
+   ... agent gets stuck thinking the rule is fundamentally wrong
+```
+
+**Rule: every edit to `parse_doc2dict_with_config.py` or
+`agreement_config.py` MUST be followed by a parser run BEFORE any
+inspection of the jsonl, regress.py invocation, or freeze attempt.**
+The mtime check in step 4 below is the canonical guard — if the jsonl
+mtime is older than your most recent parser-source mtime, the jsonl
+is stale and any regress signal you read is a phantom.
+
 ## Workflow for THIS dispatch
 
 1. Read the source-of-truth and the current output above. Decide which
@@ -380,15 +410,26 @@ The loop is INCREMENTAL — keep changes targeted:
    `--limit {limit_n}` parses idxs 0..{current_idx} inclusive. `--no-truncate`
    keeps full spans so the freeze captures real text.
 
-4. **Sanity check the parser actually emitted records for idx={current_idx}.**
-   This catches the failure mode where an over-aggressive edit silently
-   drops the target idx from the output — the freeze would then say "no
-   records for idx={current_idx}" and the dispatch would burn an attempt.
+4. **Sanity check the parser ran AND emitted records for idx={current_idx}.**
+   Two failure modes to catch here:
+   (a) the parser run was skipped or wrote to the wrong directory, so
+       the canonical jsonl is stale relative to your parser source;
+   (b) the parser ran but your edit silently dropped the target idx
+       from the output, so the freeze would say "no records for
+       idx={current_idx}" and burn an attempt.
 
-     ls -la {data_dir_abs}/parse_doc2dict_with_config_nodes.jsonl
-     # mtime should be <60s old
+   Verify both:
+
+     # The canonical jsonl must be NEWER than the parser source —
+     # otherwise it reflects a previous parser version and any regress
+     # signal will be a phantom.
+     stat -f "%m %N" {data_dir_abs}/parse_doc2dict_with_config_nodes.jsonl scripts/parse_doc2dict_with_config.py src/clause_extract/agreement_config.py | sort
+     # The jsonl line should be LAST (largest mtime). If a source file
+     # has a newer mtime, you must re-run the parser before continuing.
+
      grep -c '"idx": {current_idx}' {data_dir_abs}/parse_doc2dict_with_config_nodes.jsonl
-     # count must be > 0; if 0, your edit broke parsing for this idx — revert and try smaller
+     # count must be > 0; if 0, your edit broke parsing for this idx —
+     # revert and try a smaller change.
 
 5. **Run the regression check** before freezing:
 

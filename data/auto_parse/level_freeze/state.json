@@ -1,5 +1,5 @@
 {
-  "current_idx": 64,
+  "current_idx": 69,
   "frozen": [
     0,
     1,
@@ -64,7 +64,12 @@
     60,
     61,
     62,
-    63
+    63,
+    64,
+    65,
+    66,
+    67,
+    68
   ],
   "history": [
     {
@@ -937,6 +942,66 @@
       "action": "advance",
       "from_idx": 63,
       "to_idx": 64
+    },
+    {
+      "ts": "2026-05-10T06:58:56",
+      "action": "freeze",
+      "idx": 64,
+      "n_records": 59
+    },
+    {
+      "ts": "2026-05-10T06:58:57",
+      "action": "advance",
+      "from_idx": 64,
+      "to_idx": 65
+    },
+    {
+      "ts": "2026-05-10T07:02:38",
+      "action": "freeze",
+      "idx": 65,
+      "n_records": 208
+    },
+    {
+      "ts": "2026-05-10T07:02:45",
+      "action": "advance",
+      "from_idx": 65,
+      "to_idx": 66
+    },
+    {
+      "ts": "2026-05-10T07:09:11",
+      "action": "freeze",
+      "idx": 66,
+      "n_records": 21
+    },
+    {
+      "ts": "2026-05-10T07:09:12",
+      "action": "advance",
+      "from_idx": 66,
+      "to_idx": 67
+    },
+    {
+      "ts": "2026-05-10T07:15:26",
+      "action": "freeze",
+      "idx": 67,
+      "n_records": 68
+    },
+    {
+      "ts": "2026-05-10T07:15:27",
+      "action": "advance",
+      "from_idx": 67,
+      "to_idx": 68
+    },
+    {
+      "ts": "2026-05-10T07:21:42",
+      "action": "freeze",
+      "idx": 68,
+      "n_records": 483
+    },
+    {
+      "ts": "2026-05-10T07:21:43",
+      "action": "advance",
+      "from_idx": 68,
+      "to_idx": 69
     }
   ]
 }

@@ -2,7 +2,8 @@
 
 This is the ULURU Inc. Indemnification Agreement (idx=0 in our corpus,
 SEC envelope = "EXHIBIT 10.25"). It has NO attached subdocuments, so no
-penalty applies — levels run 0 through 4.
+penalty applies — nesting depths (the `level` field) run 0 through 4.
+Concatenating the spans below in order reconstructs the source text.
 
 ## Source structure (from the source-of-truth bs4 text)
 

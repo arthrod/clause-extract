@@ -1,9 +1,9 @@
-# Worked example — agreement with attached subdocuments (levels 0–7)
+# Worked example — agreement with attached subdocuments (depths 0–7)
 
 This example shows how the +1 subdocument penalty propagates. It is
-SYNTHETIC — built to exercise every level from 0 through 7. The actual
-SEC corpus rarely goes deeper than level 5, but the parser supports the
-full range.
+SYNTHETIC — built to exercise every nesting depth from 0 through 7
+(the `level` field in JSONL records). The actual SEC corpus rarely
+goes deeper than depth 5, but the parser supports the full range.
 
 ## Source structure (synthetic agreement with nested subdocs)
 

@@ -1,4 +1,22 @@
-# Scope rule — what is "the agreement" vs filing-trailer noise
+# Scope rule — what is "the agreement" vs filing-context noise
+
+## Document type is irrelevant — all agreements are in scope
+
+The parser treats every agreement type the same way: private bilateral
+contracts, **government contracts and amendments** (e.g. SF-30
+modifications), international/cross-border agreements, **unilateral
+instruments** (guaranties, options, releases, designations of agent,
+irrevocable proxies), multilateral / tri-party agreements. The
+structural patterns it relies on (signature lines, attached
+subdocuments with descriptive titles, numbered/lettered clause
+markers) are common across all of these. Do not add code paths that
+branch on document class.
+
+The only thing the scope rule filters out is **non-agreement
+metadata**: filing context that travels with the SEC EX-10
+attachment but isn't part of the agreement itself.
+
+## Non-agreement metadata, structurally
 
 SEC EDGAR filings frequently include filing-context content surrounding
 the agreement: cover-page exhibit numbers, page-numbered TOCs, post-
@@ -108,7 +126,10 @@ The following are NOT allowed in the parser implementation:
   structural rule.
 - Capping levels (clamp `depth` to 7, etc.) to bypass validator
   checks while leaving content in the JSONL.
+- Document-class-specific code paths (`if is_government_contract:`,
+  `if is_unilateral:`). The scope rule operates on structure, not on
+  what category of agreement the document is.
 
 The validator scans the parser source for these patterns and rejects
-the freeze if found. See [`task_rules/freeze_command.md`](freeze_command.md)
+the freeze if found. See [`freeze_command.md`](freeze_command.md)
 for what the validator looks at.

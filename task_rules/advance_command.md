@@ -8,7 +8,7 @@ Last step of every successful turn. Only after `freeze.py` and
 ## Command (copy-paste from repo root)
 
 ```bash
-cd /Users/arthrod/temp/T/clause-extract/clause-extract
+cd /Users/arthrod/temp/T/clause-extract
 uv run scripts/level_loop/advance.py
 ```
 

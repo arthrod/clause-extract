@@ -39,8 +39,15 @@ DATA = REPO / "data" / "auto_parse"
 STATE_PATH = DATA / "level_freeze" / "state.json"
 FROZEN_DIR = DATA / "level_freeze" / "frozen"
 NODES_JSONL = DATA / "parse_doc2dict_with_config_nodes.jsonl"
+SOT_JSONL = DATA / "parse_source_of_truth.jsonl"
 PARSER_SRC = REPO / "scripts" / "parse_doc2dict_with_config.py"
 CONFIG_SRC = REPO / "src" / "clause_extract" / "agreement_config.py"
+
+# Reconstruction-faithfulness gate (per docs/DECISIONS.md §10).
+# BLOCKING — below the bar the freeze is refused. Word coverage measures
+# whether concat-of-spans recovers the source's unique words; failing this
+# means the parser dropped real content.
+_RECON_FAIL_BAR_PCT = 95.0  # word coverage < this -> freeze refused
 
 console = Console()
 
@@ -294,6 +301,105 @@ def _check_monkey_patches(parser_src: str) -> list[str]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Reconstruction-faithfulness measurement (non-blocking warning)
+#
+# The parser's only goal is to slice the source HTML such that concatenating
+# the spans for one idx in JSONL line order reconstructs the source. We
+# measure that with two metrics matching scripts/measure_reconstruction.py:
+#
+#   word_coverage_pct(idx) =
+#       |source_words ∩ reconstructed_words| / |source_words| × 100
+#
+#   char_ratio_pct(idx) =
+#       len(reconstructed_norm) / len(source_norm) × 100
+#
+# where the normaliser lowercases and collapses whitespace. The freeze
+# itself does NOT block on low coverage — see task_rules/freeze_command.md
+# for why this is informational. The bars come from docs/DECISIONS.md §10.
+# ---------------------------------------------------------------------------
+
+
+def _normalize_text(text: str) -> str:
+    """Lowercase + whitespace-collapse for word-set / char-len comparison."""
+    return " ".join((text or "").lower().split())
+
+
+def _read_sot_span_clean(idx: int) -> str | None:
+    """Read parse_source_of_truth.jsonl[idx].span_clean. None if missing."""
+    if not SOT_JSONL.exists():
+        return None
+    for line in SOT_JSONL.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if rec.get("idx") == idx:
+            return rec.get("span_clean") or ""
+    return None
+
+
+def _measure_reconstruction(idx: int, records: list[dict]) -> dict | None:
+    """Compute word coverage + char ratio for one idx. None if no SoT row."""
+    source = _read_sot_span_clean(idx)
+    if source is None:
+        return None
+    reconstructed = "".join((r.get("span") or "") for r in records)
+    source_norm = _normalize_text(source)
+    recon_norm = _normalize_text(reconstructed)
+    source_words = set(source_norm.split())
+    recon_words = set(recon_norm.split())
+    if not source_words:
+        return None
+    inter = source_words & recon_words
+    word_cov = len(inter) / len(source_words) * 100
+    char_ratio = (len(recon_norm) / len(source_norm) * 100) if source_norm else 0.0
+    missing = source_words - recon_words
+    return {
+        "word_coverage_pct": word_cov,
+        "char_ratio_pct": char_ratio,
+        "n_source_words": len(source_words),
+        "n_missing_words": len(missing),
+        "sample_missing": sorted(missing)[:8],
+    }
+
+
+def _check_reconstruction(idx: int, records: list[dict]) -> list[str]:
+    """Return a list of human-readable violations from the reconstruction gate.
+
+    Empty list = passes (or no source-of-truth available). Non-empty = the
+    freeze should be refused. Word coverage below `_RECON_FAIL_BAR_PCT` is
+    the bar: any source word not appearing in the concat of spans means
+    real content was dropped by the parser.
+    """
+    m = _measure_reconstruction(idx, records)
+    if m is None:
+        console.print(
+            "  [dim]reconstruction: no source-of-truth row available for "
+            f"idx={idx} (skipping check)[/dim]"
+        )
+        return []
+    wc = m["word_coverage_pct"]
+    cr = m["char_ratio_pct"]
+    if wc >= _RECON_FAIL_BAR_PCT:
+        console.print(
+            f"  reconstruction OK: word_coverage={wc:.1f}% "
+            f"char_ratio={cr:.1f}% (≥ {_RECON_FAIL_BAR_PCT:.0f}% bar)"
+        )
+        return []
+    return [
+        (
+            f"reconstruction word_coverage={wc:.1f}% < "
+            f"{_RECON_FAIL_BAR_PCT:.0f}% bar. "
+            f"char_ratio={cr:.1f}%, missing {m['n_missing_words']} of "
+            f"{m['n_source_words']} unique source words. "
+            f"sample missing: {m['sample_missing']}"
+        )
+    ]
+
+
 def validate_records(records: list[dict]) -> list[str]:
     """Return a list of human-readable rubric violations for `records`.
 
@@ -310,8 +416,8 @@ def validate_records(records: list[dict]) -> list[str]:
     n_l0 = sum(1 for r in records if r.get("level") == 0)
     if n_l0 == 0:
         violations.append(
-            "rubric requires exactly one level-0 record (the agreement title + "
-            "preamble); found zero. The parser likely failed to identify the "
+            "rubric requires exactly one level-0 record (the agreement title "
+            "alone); found zero. The parser likely failed to identify the "
             "main agreement title."
         )
     elif n_l0 > 1:
@@ -320,6 +426,22 @@ def validate_records(records: list[dict]) -> list[str]:
             "Multiple level-0 records mean the parser is splitting the agreement "
             "into multiple roots (or capturing trailing filing boilerplate as a "
             "second 'agreement')."
+        )
+
+    # `order` must be present on every record, 0-indexed, monotonic by 1.
+    # See task_rules/level_rubric.md "JSONL record shape".
+    orders = [r.get("order") for r in records]
+    if any(o is None for o in orders):
+        violations.append(
+            "every record must carry an `order` field (0-indexed sequence "
+            "number within the idx, document order). Found record(s) without "
+            "`order` — the parser is emitting the old 3-key shape."
+        )
+    elif orders != list(range(len(orders))):
+        violations.append(
+            "`order` values must be 0, 1, 2, …, len-1 in JSONL line order. "
+            f"Got order sequence starting {orders[:8]} ending {orders[-3:]} — "
+            "non-monotonic or has gaps. See task_rules/level_rubric.md."
         )
 
     levels = [r.get("level", 0) for r in records]
@@ -426,18 +548,23 @@ def main(
     # Rubric validation gate. Refuses to freeze nonsense outputs that
     # would otherwise corrupt future regression checks.
     violations = validate_records(records)
+    # Reconstruction-faithfulness gate. The parser's stated goal is
+    # concat-of-spans = source; failing to recover ≥95% of unique source
+    # words means content was dropped. See task_rules/freeze_command.md
+    # and docs/DECISIONS.md §10.
+    violations.extend(_check_reconstruction(idx, records))
     if violations and not force:
         console.print(
-            f"[red]Refusing to freeze idx={idx}: rubric violations:[/red]"
+            f"[red]Refusing to freeze idx={idx}:[/red]"
         )
         for v in violations:
             console.print(f"  - {v}")
         console.print(
             "\nFix the parser so the output matches "
-            "task_rules/level_rubric.md, then re-run freeze. Pass --force "
-            "ONLY if a human has explicitly reviewed and accepted the "
-            "violations (e.g. an unusual document that legitimately can't "
-            "be expressed in the rubric)."
+            "task_rules/level_rubric.md AND recovers ≥95% of source words, "
+            "then re-run freeze. Pass --force ONLY if a human has explicitly "
+            "reviewed and accepted the violations (e.g. an unusual document "
+            "that legitimately can't be expressed in the rubric)."
         )
         raise typer.Exit(code=3)
 

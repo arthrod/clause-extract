@@ -1055,6 +1055,14 @@ def main(
             # JSONL only; the full record stays in the parquet via
             # all_section_records so downstream tools can still see the
             # envelope class and ID if they care.
+            # `order` is a per-idx 0-indexed sequence number assigned at
+            # JSONL emission time (i.e. AFTER envelope/trailer drops).
+            # The first record emitted for an idx has order=0, the next
+            # order=1, etc. This makes the document sequence explicit in
+            # the schema so downstream consumers reconstruct ordering
+            # without relying on JSON-key ordering. See
+            # task_rules/level_rubric.md "JSONL record shape".
+            jsonl_order = 0
             for s in sections:
                 s["idx"] = idx
                 all_section_records.append(s)
@@ -1067,10 +1075,12 @@ def main(
                     continue
                 jsonl_record = {
                     "idx": s["idx"],
+                    "order": jsonl_order,
                     "level": s["depth"],
                     "span": span if no_truncate else _truncate_for_jsonl(span),
                 }
                 nodes_jsonl.write(json.dumps(jsonl_record, ensure_ascii=False) + "\n")
+                jsonl_order += 1
 
             progress.update(
                 task,

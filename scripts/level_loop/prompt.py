@@ -173,12 +173,15 @@ def render_attempt_history(idx: int) -> tuple[int, str]:
 
 
 PROMPT_TEMPLATE = """\
-# clause-extract level-tuning loop — dispatch for idx={current_idx}
+# clause-extract parser-tuning loop — dispatch for idx={current_idx}
 
-Your job: tune `parse_doc2dict_with_config.py` and/or
+The parser's only goal is to slice each agreement's HTML into clauses
+with hierarchy — clause text plus **nesting depth** — so that
+concatenating the spans in document order reconstructs the source
+faithfully. Your job: tune `parse_doc2dict_with_config.py` and/or
 `src/clause_extract/agreement_config.py` so the parser produces
-RUBRIC-COMPLIANT output for idx={current_idx} without regressing
-already-frozen idxs.
+rubric-compliant, reconstruction-faithful output for idx={current_idx}
+without regressing already-frozen idxs.
 
 Each dispatch handles **EXACTLY ONE idx**. After one successful
 freeze + advance for idx={current_idx}, **STOP and EXIT** — the driver
@@ -191,36 +194,84 @@ The driver gives you up to 3 dispatches per idx if a dispatch fails
 {attempt_history}
 ## Source of truth (canonical)
 
-The level rubric, the scope rule, and the worked examples are the
-single source of truth for what a "correct" parse looks like:
+The rubric, the scope rule, and the worked examples are the single
+source of truth for what a "correct" parse looks like:
 
-  - `task_rules/level_rubric.md` — levels 0–7, SEC-envelope drop,
-    subdocument level penalty.
+  - `task_rules/level_rubric.md` — depth 0–7 rubric (read `level`
+    as nesting depth), SEC-envelope drop, subdocument depth penalty,
+    reconstruction-faithfulness bar.
   - `task_rules/scope_rule.md` — STRUCTURAL agreement-vs-trailer
     classification using signature-block + real-subdoc detection.
+    Document type is irrelevant (private, government, unilateral,
+    multilateral all use the same rules).
   - `task_rules/examples_main_agreement.md` — flat agreement worked.
   - `task_rules/examples_with_subdocs.md` — subdoc penalty up to L7.
-  - `task_rules/freeze_command.md` — what the freeze validator checks.
+  - `task_rules/freeze_command.md` — what the freeze validator checks
+    (rubric, monkey-patch, AND reconstruction gates are all BLOCKING:
+    word coverage < 95% → freeze refused).
 
 READ AT LEAST `level_rubric.md` AND `scope_rule.md` BEFORE EDITING.
 
 The corpus's source-of-truth dump is at
-`data/auto_parse/parse_source_of_truth.jsonl` — bs4 plain text +
-raw HTML per idx. Use it to verify your parse's reconstruction.
+`data/auto_parse/parse_source_of_truth.jsonl` — bs4 plain text per
+idx in `span_clean`, raw HTML in `span_html`. Concat-of-spans from
+your parser should approximate `span_clean[idx]` for idx={current_idx}.
+
+## Scope: every kind of agreement is in scope
+
+All agreement types parse under the same rubric: private bilateral
+contracts, **government contracts and amendments** (SF-30 etc.),
+international/cross-border agreements, **unilateral instruments**
+(guaranties, options, releases, designations of agent, irrevocable
+proxies), multilateral / tri-party agreements. The structural
+patterns the parser detects (numbered Sections, lettered subsections,
+signature lines, attached subdocuments) are common to all of them.
+
+Out of scope is **non-agreement metadata only** — the SEC envelope,
+post-signature filing trailers (press releases, About-Company,
+forward-looking-statement disclaimers, contact blocks). The scope rule
+in `task_rules/scope_rule.md` filters those structurally; it does NOT
+filter by what kind of agreement the document is. Do NOT add
+document-class-specific code (`if is_government_contract`, `if
+is_unilateral`) — if a branch by document class feels needed, the
+structural rule needs fixing instead.
 
 ## Level rubric (one-screen summary — full version in level_rubric.md)
 
-Levels are 0-indexed depths in the agreement's structural hierarchy:
+Each JSONL record has four keys: `idx`, `order`, `level`, `span`.
 
-  - L0 = the agreement itself (EXACTLY one record per idx: title +
-    preamble paragraph).
-  - L1 = top-level headings + recitals: party metadata, WITNESSETH /
-    WHEREAS, signature block, real-subdoc HEADERS.
-  - L2 = numbered Sections ("1.", "ARTICLE 1", "Section 1.1").
-  - L3 = lettered subsections ("(a)", "(b)").
-  - L4 = sub-sub items ("(i)", "(A)", "(1)").
-  - L5–L7 = same as L2–L4 but inside 1, 2, or 3 levels of subdoc
-    nesting (each subdoc adds +1 penalty to descendants).
+  - `order` is a 0-indexed sequence number within idx, in document
+    order. First emitted span has `order=0`, second has `order=1`,
+    etc. Monotonic per-idx, no gaps.
+  - `level` is a 0-indexed **nesting depth** into the agreement's
+    structural hierarchy.
+
+Standalone agreement (no subdocuments):
+
+  - Depth 0 = the agreement **TITLE ALONE** (exactly one record per
+    idx). The preamble is NOT depth 0 — it is depth 1.
+  - Depth 1 = every direct child of the agreement: preamble
+    paragraph, recitals block, **each top-level body clause**
+    (Article when the doc uses Article/Section nesting, otherwise
+    the numbered Section), and the signature block.
+  - Depth 2 = direct children of L1 clauses: Section under Article,
+    or lettered "(a)/(b)/(c)" subsection under a top Section.
+  - Depth 3 = direct children of L2 clauses: lettered "(a)" under
+    Section-under-Article, or roman/letter/digit "(i)/(A)/(1)"
+    items under "(a)".
+  - Depth 4+ = deeper nesting (rare in EX-10 main bodies).
+  - Subdocument penalty: each subdoc ancestor (cls=exhibit/schedule/
+    appendix/annex with descriptive title, NOT the SEC envelope)
+    adds +1 to every descendant's depth. Ceiling 7.
+
+The agreement title and the preamble paragraph are TWO records:
+title → L0 alone; preamble → L1 (one of the agreement's children).
+
+For documents with a flatter structure (a unilateral designation, a
+one-page release, a government form with numbered fields), the
+deeper depths may simply not appear — that is correct. Depths
+capture structure that exists in the source; don't synthesise depth
+that isn't there.
 
 The SEC envelope ("EXHIBIT 10.25" with empty body, FIRST exhibit-class
 section per idx) is `is_envelope=true`, kept in parquet, dropped from
@@ -355,6 +406,36 @@ The loop is INCREMENTAL — keep changes targeted:
 - The current parser output above is what you start from. Read the
   level distribution and the offending records FIRST, then decide.
 
+## Critical workflow rule: re-run the parser after EVERY edit
+
+`regress.py` and `freeze.py` both read the canonical jsonl on disk
+at `{data_dir_abs}/parse_doc2dict_with_config_nodes.jsonl`. That file
+is **only refreshed when you run the parser**. If you edit the parser
+source and skip the parser run, regress.py will compare frozen
+baselines against the OLD jsonl from the previous parser run — giving
+phantom regressions that have nothing to do with your latest edit.
+
+**The single most common dispatch failure is reading stale jsonl after
+multiple edits.** It looks like this:
+
+```
+1. Edit parser (attempt 1)
+2. Run parser   ← jsonl refreshed
+3. Run regress  ← REGRESSION (real)
+4. Edit parser (attempt 2)
+5. Run regress  ← REGRESSION (FALSE — still reading attempt-1 jsonl)
+6. Edit parser (attempt 3)
+7. Run regress  ← REGRESSION (FALSE — still reading attempt-1 jsonl)
+   ... agent gets stuck thinking the rule is fundamentally wrong
+```
+
+**Rule: every edit to `parse_doc2dict_with_config.py` or
+`agreement_config.py` MUST be followed by a parser run BEFORE any
+inspection of the jsonl, regress.py invocation, or freeze attempt.**
+The mtime check in step 4 below is the canonical guard — if the jsonl
+mtime is older than your most recent parser-source mtime, the jsonl
+is stale and any regress signal you read is a phantom.
+
 ## Workflow for THIS dispatch
 
 1. Read the source-of-truth and the current output above. Decide which
@@ -380,15 +461,26 @@ The loop is INCREMENTAL — keep changes targeted:
    `--limit {limit_n}` parses idxs 0..{current_idx} inclusive. `--no-truncate`
    keeps full spans so the freeze captures real text.
 
-4. **Sanity check the parser actually emitted records for idx={current_idx}.**
-   This catches the failure mode where an over-aggressive edit silently
-   drops the target idx from the output — the freeze would then say "no
-   records for idx={current_idx}" and the dispatch would burn an attempt.
+4. **Sanity check the parser ran AND emitted records for idx={current_idx}.**
+   Two failure modes to catch here:
+   (a) the parser run was skipped or wrote to the wrong directory, so
+       the canonical jsonl is stale relative to your parser source;
+   (b) the parser ran but your edit silently dropped the target idx
+       from the output, so the freeze would say "no records for
+       idx={current_idx}" and burn an attempt.
 
-     ls -la {data_dir_abs}/parse_doc2dict_with_config_nodes.jsonl
-     # mtime should be <60s old
+   Verify both:
+
+     # The canonical jsonl must be NEWER than the parser source —
+     # otherwise it reflects a previous parser version and any regress
+     # signal will be a phantom.
+     stat -f "%m %N" {data_dir_abs}/parse_doc2dict_with_config_nodes.jsonl scripts/parse_doc2dict_with_config.py src/clause_extract/agreement_config.py | sort
+     # The jsonl line should be LAST (largest mtime). If a source file
+     # has a newer mtime, you must re-run the parser before continuing.
+
      grep -c '"idx": {current_idx}' {data_dir_abs}/parse_doc2dict_with_config_nodes.jsonl
-     # count must be > 0; if 0, your edit broke parsing for this idx — revert and try smaller
+     # count must be > 0; if 0, your edit broke parsing for this idx —
+     # revert and try a smaller change.
 
 5. **Run the regression check** before freezing:
 
@@ -399,9 +491,23 @@ The loop is INCREMENTAL — keep changes targeted:
    freeze with a regressed parser — that just wastes attempts.
 
 6. Inspect the output for idx={current_idx} in
-   `{data_dir_abs}/parse_doc2dict_with_config_nodes.jsonl`. Verify the
-   levels match the rubric: exactly one level-0, no levels > 7 unless
-   the document has 3+ subdocs, no SEC-filing boilerplate captured.
+   `{data_dir_abs}/parse_doc2dict_with_config_nodes.jsonl`. Verify two
+   things:
+
+   (a) **Rubric**: exactly one depth-0 record, max depth ≤ 7, no
+       envelope as first record, no SEC-filing boilerplate captured.
+
+   (b) **Reconstruction**: concat-of-spans must approximate the
+       source-of-truth. Run:
+
+         uv run scripts/measure_reconstruction.py --idx {current_idx}
+
+       Read the word coverage and char ratio. Word coverage < 95%
+       is a HARD FAIL at freeze time — the freeze gate refuses
+       below the bar. If you're below 95%, the parser dropped real
+       content; find the missing words in the source, locate the
+       record(s) that should have captured them, and fix the
+       slicing. Then re-run the parser and try again.
 
 7. If correct, freeze:
 
@@ -409,17 +515,26 @@ The loop is INCREMENTAL — keep changes targeted:
 
    freeze.py validates the records AND scans the parser source. It
    refuses on ANY of:
-     - rubric violations (0 or >1 level-0 records, max level > 7,
+     - rubric violations (0 or >1 depth-0 records, max depth > 7,
        first record = SEC envelope marker, filing-trailer pattern
        found in any span);
      - monkey-patch hits in parser source (named blocklist constants,
        trailer keyword pairs in any string literal, level-capping
        arithmetic).
 
-   If freeze rejects, READ THE DIAGNOSTIC, fix the parser source
+   freeze.py also enforces a BLOCKING reconstruction gate: if word
+   coverage for this idx is below 95%, the freeze is refused. The
+   error message includes the percentage, char ratio, count of
+   missing words, and a sample of the missing words. Use that sample
+   to localize what got dropped, fix the parser slicing, re-run the
+   parser, and try freeze again.
+
+   If freeze rejects for ANY reason (rubric, monkey-patch, or
+   reconstruction), READ THE DIAGNOSTIC, fix the parser source
    accordingly (do NOT add new monkey-patches; remove the offending
-   shape), re-run the parser, and try freeze again WITHIN this
-   dispatch. Do NOT pass --force.
+   shape; for reconstruction, find the missing content), re-run the
+   parser, and try freeze again WITHIN this dispatch. Do NOT pass
+   --force.
 
 8. Advance to the next idx — EXACTLY ONCE:
 
@@ -440,17 +555,36 @@ The loop is INCREMENTAL — keep changes targeted:
 - Never edit files under `data/auto_parse/level_freeze/frozen/` by
   hand.
 - Never call `freeze.py --force`. Only humans force.
+- **DO NOT ASK QUESTIONS.** This is a fully autonomous dispatch — there
+  is no human to answer. When you face a judgment call, make the most
+  pragmatic choice that lets the rubric pass and the freeze advance,
+  and document your reasoning in the commit message and/or attempt
+  notes. Asking and exiting wastes a dispatch slot.
+- **doc2dict text-loss fallback.** If doc2dict has dropped content
+  the rubric expects (title/preamble missing, content past page-break
+  HRs gone, etc.), accept what is available: promote the first
+  available section as L0 and freeze. Note the truncation in your
+  commit message. Do NOT block on this — it is a known limitation
+  and downstream tooling will surface incomplete spans.
 - If you cannot make the rubric pass without breaking a frozen idx,
   STOP, print one line of WHY, and exit. The driver will retry with
   a fresh dispatch (with your failure recorded in attempt history).
 - DO NOT use phrase blocklists, trailer-keyword regexes, or level
   capping. Use the structural scope rule.
+- DO NOT add document-class-specific code paths
+  (`if is_government_contract`, `if is_unilateral`, etc.). The
+  structural rules apply uniformly across agreement types; branches
+  by document class mean the rule itself needs rethinking. The parser
+  works the same for private, government, unilateral, and
+  international agreements.
 - **ONE ADVANCE PER DISPATCH.** After `advance.py` succeeds for
   idx={current_idx}, EXIT. Do NOT loop into another idx. The driver
   is responsible for the next idx; the agent's scope is exactly one.
-- **NEVER call freeze.py or advance.py twice in one dispatch.** If
-  you somehow find yourself looking at idx={current_idx}+1 after a
-  successful advance, that means you should be DONE — stop now.
+- `freeze.py` may be retried within the same dispatch after fixing a
+  rejection (re-run the parser first, then re-call freeze). Do NOT
+  pass `--force`. Never call `advance.py` twice. If you find yourself
+  looking at idx={current_idx}+1 after a successful advance, you are
+  DONE — stop now.
 """
 
 

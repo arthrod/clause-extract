@@ -20,6 +20,18 @@
       "action": "freeze",
       "idx": 0,
       "n_records": 76
+    },
+    {
+      "ts": "2026-05-16T00:28:41",
+      "action": "freeze",
+      "idx": 0,
+      "n_records": 73
+    },
+    {
+      "ts": "2026-05-16T00:30:03",
+      "action": "freeze",
+      "idx": 0,
+      "n_records": 73
     }
   ]
 }

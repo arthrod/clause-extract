@@ -1576,14 +1576,37 @@ def _sort_records_by_source_position(
     if not sot_text:
         return rows
 
-    # Normalize source: lowercase, collapse all whitespace+nbsp to single
-    # space. Record the new->old index map so a found "norm offset" can
-    # be turned back into a position in the original string (we don't
-    # actually need this for sorting; we sort by norm offset directly).
-    sot_norm = re.sub(r"[\s\xa0]+", " ", sot_text.lower())
+    # Normalize source and probes: lowercase; collapse all whitespace
+    # (including nbsp) to single space; fold curly quotes and Unicode
+    # dashes to ASCII; STRIP ALL QUOTE CHARACTERS AND WHITESPACE-NEXT-
+    # TO-QUOTES; collapse runs of space again. The quote-strip+space-
+    # collapse makes typographically-decorated text like
+    #    (b) " Corporate Status " describes
+    # match a probe whose title is
+    #    (b) "Corporate Status" describes
+    # by reducing both to
+    #    (b) corporate status describes
+    # i.e. spaces-around-quotes inside the source no longer break the
+    # match. Quote characters themselves carry no positional signal
+    # for clause-boundary location; dropping them is safe.
+    def _typographic_fold(s: str) -> str:
+        s = s.translate(str.maketrans({
+            "‘": "'", "’": "'", "‚": "'", "′": "'",
+            "“": '"', "”": '"', "„": '"', "″": '"',
+            "‐": "-", "‑": "-", "‒": "-", "–": "-",
+            "—": "-", "―": "-", "−": "-",
+        }))
+        return s
+
+    def _strip_quotes_and_collapse(s: str) -> str:
+        # Remove ASCII quote characters and collapse whitespace.
+        s = s.replace('"', '').replace("'", '')
+        return re.sub(r"[\s\xa0]+", " ", s).strip()
+
+    sot_norm = _strip_quotes_and_collapse(_typographic_fold(sot_text).lower())
 
     def _normalize_probe(s: str) -> str:
-        return re.sub(r"[\s\xa0]+", " ", s.lower()).strip()
+        return _strip_quotes_and_collapse(_typographic_fold(s).lower())
 
     def _probe_candidates(rec: dict[str, Any]) -> list[str]:
         """Build progressively-shorter probes for the record."""
@@ -1840,6 +1863,457 @@ def _split_inline_section_markers(rows: list[dict[str, Any]]) -> list[dict[str, 
     return new_rows
 
 
+def _drop_pre_title_cover_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop filing-cover records that appear BEFORE the L0 agreement title.
+
+    SEC EDGAR filings sometimes carry a registrant cover-page sequence:
+        EXHIBIT 10.25                   <- envelope (already dropped)
+        ULURU Inc.                      <- cover-page registrant name (this fix)
+        INDEMNIFICATION AGREEMENT       <- L0 title
+
+    The registrant short-name record (and any other empty-body record
+    sandwiched between the envelope and the L0 title) is filing metadata,
+    not agreement content. doc2dict's tree walker promotes it as a real
+    section because the HTML wraps it in its own block element.
+
+    Structural rule: any in-scope record whose node-id is LESS than the
+    L0 title's node-id and which has an empty body is filing metadata —
+    a registrant short-name, exhibit-number echo, or similar one-liner
+    that sits in the cover-page region. Mark such records as
+    ``is_envelope=True`` so they're kept in the parquet (audit) but
+    dropped from the JSONL (rubric output).
+
+    This applies only when an L0 title exists. The rule is depth-agnostic
+    and content-agnostic — no company-name or phrase matching. The "empty
+    body" predicate distinguishes a cover-page label (no body text) from
+    a real agreement record (which always has body content or markers).
+    """
+    l0: dict[str, Any] | None = None
+    for r in rows:
+        if (
+            r.get("depth") == 0
+            and not r.get("is_envelope")
+            and r.get("scope") == "agreement"
+        ):
+            l0 = r
+            break
+    if l0 is None:
+        return rows
+
+    l0_node_id = l0["node_id"]
+    for r in rows:
+        if r is l0:
+            continue
+        if r.get("is_envelope") or r.get("scope") == "trailer":
+            continue
+        # Records walked BEFORE the L0 title (smaller node_id) with no body
+        # are cover-page filing metadata. The envelope itself is already
+        # excluded by the is_envelope check above.
+        if r["node_id"] >= l0_node_id:
+            continue
+        body = (r.get("body_direct") or "").strip()
+        title = (r.get("title") or "").strip()
+        if body:
+            continue
+        if not title:
+            # Empty record — already gets skipped by the JSONL emitter.
+            continue
+        # Mark as envelope so JSONL drops it; parquet still records the
+        # row via all_section_records.
+        r["is_envelope"] = True
+    return rows
+
+
+# Single-letter "(i)" marker — ambiguous between Roman numeral 1 and the
+# alphabetical letter "i" (between "h" and "j"). Disambiguation requires
+# sibling context: see _reclassify_letter_i_to_alphabetical.
+_SINGLE_LETTER_I_TITLE_RE = re.compile(r"^\s*\([iI]\)")
+
+
+def _reclassify_letter_i_to_alphabetical(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Reclassify "(i)" records from Roman-numeral to alphabetical when
+    the surrounding sibling sequence is alphabetical (h)-(i)-(j).
+
+    doc2dict and `_LEVEL_PATTERNS` treat "(i)" as a Roman numeral by
+    default (it is, in most contexts: under an "(a)" letter, "(i)" is
+    the first Roman item). But "(i)" is ALSO the alphabetical letter
+    between "(h)" and "(j)". The disambiguation is purely contextual:
+
+      - If the IMMEDIATELY PRECEDING and IMMEDIATELY FOLLOWING active
+        siblings (in node_id order, under the same parent or the same
+        flat letter-sequence) bear lettered markers "(h)" and "(j)",
+        then this "(i)" is alphabetical — peer of its lettered siblings.
+      - If the preceding sibling is "(vii)" or "(viii)" or similar
+        Roman context, "(i)" is Roman — child of its lettered parent.
+
+    Structural fix: when "(i)" is identified as alphabetical, re-parent
+    it to be a sibling of "(h)" (i.e. set its parent_node_id to "(h)"'s
+    parent) and adjust its depth to match "(h)"'s depth.
+
+    Operates on the marker SEQUENCE, not the marker shape alone.
+    """
+    by_node_id = {r["node_id"]: r for r in rows}
+
+    # Build a list of all active records with their letter-or-roman
+    # classification, in node_id order. We use a flat scan because the
+    # tree parenting can be wrong (doc2dict pathology) — the SOURCE
+    # sequence (h)/(i)/(j) is what matters.
+    actives = [
+        r for r in rows
+        if not r.get("is_envelope") and r.get("scope") != "trailer"
+    ]
+    actives.sort(key=lambda r: r["node_id"])
+
+    # Identify each candidate "(i)" record and check sibling context.
+    for idx_i, r in enumerate(actives):
+        title = (r.get("title") or "").strip()
+        if not _SINGLE_LETTER_I_TITLE_RE.match(title):
+            continue
+        # Determine the previous and next active record with a
+        # lettered/roman marker (skip non-marker neighbours like prose
+        # or section headers).
+        prev_marker = None
+        for j in range(idx_i - 1, -1, -1):
+            prev_title = (actives[j].get("title") or "").strip()
+            prev_kind = _classify_subsection_kind(prev_title)
+            if prev_kind in {"lettered", "roman"}:
+                prev_marker = (actives[j], prev_kind, _extract_letter_marker(prev_title))
+                break
+            if prev_kind == "numbered":
+                # Cross-section boundary — stop scanning back.
+                break
+        next_marker = None
+        for j in range(idx_i + 1, len(actives)):
+            next_title = (actives[j].get("title") or "").strip()
+            next_kind = _classify_subsection_kind(next_title)
+            if next_kind in {"lettered", "roman"}:
+                next_marker = (actives[j], next_kind, _extract_letter_marker(next_title))
+                break
+            if next_kind == "numbered":
+                break
+
+        # Alphabetical context: previous is letter "(h)" AND/OR next is
+        # letter "(j)". We require at least one anchor to be a clean
+        # alphabetical neighbour; both, for a strong signal.
+        prev_is_h = (
+            prev_marker is not None
+            and prev_marker[1] == "lettered"
+            and prev_marker[2] == "h"
+        )
+        next_is_j = (
+            next_marker is not None
+            and next_marker[1] == "lettered"
+            and next_marker[2] == "j"
+        )
+        if not (prev_is_h or next_is_j):
+            continue
+        # Confirmed alphabetical "(i)". Reparent and re-depth to match
+        # the lettered neighbour. Also re-parent any records that were
+        # wrongly placed under "(i)" — when "(i)" was being treated as
+        # Roman, doc2dict's HTML walker may have parented the FOLLOWING
+        # alphabetical sibling "(j)" (and a subsequent numbered section
+        # like "7.") underneath "(i)". We re-attach those records to
+        # "(i)"'s new parent so they share the same depth as their
+        # actual siblings.
+        anchor = prev_marker[0] if prev_is_h else next_marker[0]
+        anchor_parent_id = anchor.get("parent_node_id")
+        anchor_depth = anchor.get("depth", r.get("depth", 2))
+        old_i_id = r["node_id"]
+        r["parent_node_id"] = anchor_parent_id
+        r["depth"] = anchor_depth
+        # Re-parent any records currently parented under (i) to (i)'s
+        # new parent. These were misclassified as children when (i) was
+        # treated as Roman; they're actually siblings in alphabetical
+        # numbering. Walk children of (i) and re-parent each one.
+        for child in rows:
+            if child.get("parent_node_id") == old_i_id:
+                child["parent_node_id"] = anchor_parent_id
+                # Set depth equal to the anchor (so (j) sits at the
+                # same depth as (h)/(i)). For records that are actually
+                # numbered sections wrongly parented under (i), the
+                # downstream `_reparent_lettered_subsections_to_numbered_siblings`
+                # pass would re-attach them; here we just set depth to
+                # match their structural peer.
+                child_kind = _classify_subsection_kind(
+                    (child.get("title") or "").strip()
+                )
+                if child_kind == "numbered":
+                    # A numbered section misparented under (i) — its
+                    # actual depth is 1 + subdoc_penalty.
+                    child["depth"] = 1 + (child.get("subdoc_penalty") or 0)
+                else:
+                    child["depth"] = anchor_depth
+    return rows
+
+
+# Signature line: "/s/ Jane Doe", "/s/ Terrance K. Wallberg".
+_SIGN_OFF_RE = re.compile(r"/s/\s+\w+")
+
+# A "fragmented signature anchor" is a record whose TITLE itself starts
+# with the /s/ marker. Such a record represents the signature line as
+# its own standalone node — typically the result of doc2dict's HTML
+# walker fragmenting the signature block across multiple section nodes
+# (one per visual line). A record whose BODY contains /s/ but whose
+# title is the party name is ALREADY a consolidated signature block —
+# we leave that one alone.
+_SIG_TITLE_ANCHOR_RE = re.compile(r"^\s*/s/\s+\w+")
+
+# "Continuation" content typical of signature block lines after /s/:
+# By:/Name:/Title:/Address: prefixes, or a bare name on its own line.
+_SIG_BLOCK_CONTINUATION_RE = re.compile(
+    r"(?i)^(?:by\s*:|name\s*:|title\s*:|address\s*:|/s/\s)",
+)
+
+# Short uppercase tag that acts as a signature-block party label
+# (e.g. "INDEMNITEE", "INDEMNITOR", "LENDER", "BORROWER"). Detected by
+# SHAPE — 1-3 words, all uppercase letters (or with light punctuation),
+# not enumeration-driven.
+_SIG_BLOCK_LABEL_RE = re.compile(r"^[A-Z][A-Z .,&'\-]{1,40}$")
+
+
+def _merge_signature_blocks(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge signature-block fragments into a single record per party.
+
+    Pattern this fixes (doc2dict's HTML-walker fragmentation of the
+    signature block on the indemnitee side):
+        nid=64  "ULURU Inc."          body="By: /s/ Terrance K. Wallberg\\nName: ...\\nTitle: ..."  <- 1 record (already consolidated)
+        nid=65  "INDEMNITEE"          body=""    <- party label
+        nid=66  "/s/ Vaidehi Shah"    body=""    <- signature line
+        nid=67  "Vaidehi Shah"        body="Address: ..."  <- name + address
+
+    The Company side (nid=64) already merges title + body. The Indemnitee
+    side comes through as a parent-child chain (each node's parent is the
+    previous node). All four pieces are ONE LOGICAL party block.
+
+    Symmetric structural rule (detect by SHAPE, not by enumeration):
+      1. Find every record whose span contains `/s/\\s+\\w+` (signature line).
+      2. From the signature-line record, walk BACK through the document-
+         order neighbour records: absorb any short uppercase party label
+         (1-3 words, all caps) sitting immediately before the signature.
+      3. Walk FORWARD: absorb subsequent records whose body matches a
+         signature-block continuation pattern (By:/Name:/Title:/Address:)
+         or that are bare name lines without their own section marker.
+      4. Merge all absorbed records into ONE record with the leading
+         label as title (when present) and the concatenated body of all
+         the rest.
+
+    The merge applies only when the absorbed records form an unbroken
+    parent-child chain at the signature block's depth — meaning they
+    represent the same party's signature, not two parties' blocks.
+    """
+    by_node_id = {r["node_id"]: r for r in rows}
+    children_of: dict[int | None, list[dict[str, Any]]] = {}
+    for r in rows:
+        children_of.setdefault(r.get("parent_node_id"), []).append(r)
+    for pid in children_of:
+        children_of[pid].sort(key=lambda r: r["node_id"])
+
+    actives = [
+        r for r in rows
+        if not r.get("is_envelope") and r.get("scope") != "trailer"
+    ]
+    actives.sort(key=lambda r: r["node_id"])
+    active_index = {r["node_id"]: i for i, r in enumerate(actives)}
+
+    def _span_text(r: dict[str, Any]) -> str:
+        t = (r.get("title") or "").strip()
+        b = (r.get("body_direct") or "").strip()
+        if t and b:
+            return f"{t}\n{b}"
+        return t or b
+
+    def _has_section_marker_title(r: dict[str, Any]) -> bool:
+        """True if title bears a numbered/lettered/roman section marker —
+        such records are agreement clauses, not signature fragments."""
+        title = (r.get("title") or "").strip()
+        if not title:
+            return False
+        return _classify_subsection_kind(title) is not None
+
+    visited: set[int] = set()
+    new_rows: list[dict[str, Any]] = []
+
+    def _is_in_cluster_chain(node: dict[str, Any], cluster_ids: set[int]) -> bool:
+        """True if node's tree-parent chain leads into the cluster."""
+        cur = node.get("parent_node_id")
+        seen: set[int] = set()
+        while cur is not None and cur not in seen:
+            seen.add(cur)
+            if cur in cluster_ids:
+                return True
+            parent = by_node_id.get(cur)
+            if parent is None:
+                break
+            cur = parent.get("parent_node_id")
+        return False
+
+    # Iterate through actives in order. The anchor is a record whose
+    # TITLE itself starts with /s/ — that's the structural marker of
+    # signature-block FRAGMENTATION. A record whose BODY contains /s/
+    # but title is a party name is already consolidated; skip it.
+    i = 0
+    while i < len(actives):
+        r = actives[i]
+        if r["node_id"] in visited:
+            i += 1
+            continue
+        title = (r.get("title") or "").strip()
+        is_anchor = bool(_SIG_TITLE_ANCHOR_RE.match(title))
+        if not is_anchor:
+            new_rows.append(r)
+            visited.add(r["node_id"])
+            i += 1
+            continue
+
+        # Found a fragmented signature anchor. Build the cluster.
+        cluster_start_i = i
+        # Walk BACK to absorb a leading party label, if any. Note: the
+        # `visited` check is NOT used here because party labels were
+        # already appended to `new_rows` in earlier iterations; we may
+        # need to retroactively remove them from `new_rows` once we
+        # absorb them into this cluster.
+        while cluster_start_i > 0:
+            prev = actives[cluster_start_i - 1]
+            prev_title = (prev.get("title") or "").strip()
+            prev_body = (prev.get("body_direct") or "").strip()
+            if not prev_title or prev_body:
+                break
+            if not _SIG_BLOCK_LABEL_RE.match(prev_title):
+                break
+            if _has_section_marker_title(prev):
+                break
+            # Already-consolidated /s/ block? Don't absorb.
+            if _SIGN_OFF_RE.search(prev_body) or _SIGN_OFF_RE.search(prev_title):
+                # A previous /s/ record that's ALREADY in its own
+                # consolidated record — stop, don't merge across
+                # different parties.
+                break
+            # Chain test: prev must be a direct ancestor of r in the
+            # tree (parent, grandparent, ...). Otherwise leave alone.
+            chain_ok = False
+            cur = r.get("parent_node_id")
+            seen: set[int] = set()
+            while cur is not None and cur not in seen:
+                seen.add(cur)
+                if cur == prev["node_id"]:
+                    chain_ok = True
+                    break
+                parent = by_node_id.get(cur)
+                if parent is None:
+                    break
+                cur = parent.get("parent_node_id")
+            if not chain_ok:
+                break
+            # Absorb prev into the cluster — retroactively remove it
+            # from new_rows if it was added in a previous loop iteration.
+            if prev in new_rows:
+                new_rows.remove(prev)
+            cluster_start_i -= 1
+
+        # Walk FORWARD from the /s/ anchor to absorb continuation
+        # records that are IN THE TREE-CHAIN of the cluster — name
+        # lines, By:/Name:/Title:/Address: lines, address blanks.
+        cluster_end_i = i  # inclusive
+        for j in range(i + 1, len(actives)):
+            nxt = actives[j]
+            if nxt["node_id"] in visited:
+                break
+            nxt_title = (nxt.get("title") or "").strip()
+            nxt_body = (nxt.get("body_direct") or "").strip()
+            # Stop on any record with a section marker — that's a
+            # clause start.
+            if _has_section_marker_title(nxt):
+                break
+            cluster_node_ids = {actives[k]["node_id"] for k in range(cluster_start_i, j)}
+            # Stop unless the candidate is in the parent-chain of the
+            # cluster. This prevents leaking into the preamble (whose
+            # parent is the L0 title, not in the cluster).
+            if not _is_in_cluster_chain(nxt, cluster_node_ids):
+                break
+            # If the candidate's content suggests a new SIGNATURE BLOCK
+            # for a different party (its own /s/ at title start), stop
+            # — that's another party's anchor.
+            if _SIG_TITLE_ANCHOR_RE.match(nxt_title):
+                # If it's in our chain it's part of our block; that's
+                # fine, continue absorbing.
+                pass
+            # Otherwise absorb as continuation if shape is signature-
+            # block-like (short label, By:/Name:/Title:/Address:, or a
+            # bare body continuation).
+            absorbed = False
+            if _SIG_BLOCK_CONTINUATION_RE.search(nxt_title):
+                absorbed = True
+            elif nxt_body and _SIG_BLOCK_CONTINUATION_RE.search(nxt_body[:80]):
+                absorbed = True
+            elif not nxt_title and nxt_body:
+                absorbed = True
+            elif nxt_title and not nxt_body and len(nxt_title.split()) <= 4:
+                absorbed = True
+            elif nxt_title and nxt_body:
+                # Mixed title+body in chain — absorb (e.g. "Vaidehi Shah"
+                # with body "Address:").
+                absorbed = True
+            if not absorbed:
+                break
+            cluster_end_i = j
+
+        # Now merge actives[cluster_start_i .. cluster_end_i] into one
+        # record. Take the LEADING record as the merged record's
+        # identity (its node_id, parent_node_id, depth, subdoc_penalty).
+        # Concatenate spans (title \n body) in order.
+        cluster = actives[cluster_start_i:cluster_end_i + 1]
+        if len(cluster) == 1:
+            new_rows.append(r)
+            visited.add(r["node_id"])
+            i += 1
+            continue
+
+        leader = cluster[0]
+        merged_parts: list[str] = []
+        for c in cluster:
+            ct = (c.get("title") or "").strip()
+            cb = (c.get("body_direct") or "").strip()
+            piece = "\n".join(p for p in (ct, cb) if p)
+            if piece:
+                merged_parts.append(piece)
+        merged_body = "\n".join(merged_parts[1:]) if len(merged_parts) > 1 else ""
+        leader_title = (leader.get("title") or "").strip()
+        # If the leader's title is empty but its body is non-empty,
+        # promote the first line of the body as the title.
+        if not leader_title and merged_parts:
+            leader_title = merged_parts[0].split("\n", 1)[0]
+            # And drop the leader piece from merged_body since it's now title.
+            # (We already excluded it from merged_body above by slicing [1:].)
+
+        leader["title"] = leader_title
+        leader["body_direct"] = merged_body
+        leader["body_direct_chars"] = len(merged_body)
+        # Mark the absorbed (non-leader) cluster members as envelope so
+        # they drop from JSONL. Their data stays in parquet via the
+        # all_section_records list for audit.
+        for c in cluster[1:]:
+            c["is_envelope"] = True
+            visited.add(c["node_id"])
+        visited.add(leader["node_id"])
+        new_rows.append(leader)
+        # Advance past the consumed cluster.
+        i = cluster_end_i + 1
+
+    # Some non-active rows (envelope/trailer) were not added above; add
+    # them back in their original positions to preserve the parquet view.
+    # Build the final list by walking original `rows` and substituting
+    # the merged leaders in place of the consumed records.
+    consumed = {nid for nid in visited if by_node_id[nid].get("is_envelope") and nid not in {r["node_id"] for r in rows if r.get("is_envelope") and not by_node_id.get(nid)}}
+    # The above is paranoid — simpler: every row stays in the list,
+    # but consumed cluster members have is_envelope=True so JSONL drops
+    # them. We just return `rows` (mutated in place).
+    return rows
+
+
 def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     size_kb = round(len(raw) / 1024, 2)
     base: dict[str, Any] = {
@@ -1894,6 +2368,18 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
     # sibling section whose lettered children's enumeration would
     # naturally continue with that letter.
     sections = _split_foreign_lettered_markers_from_body(sections)
+    # Reclassify single-letter "(i)" from Roman to alphabetical when
+    # surrounded by "(h)"/"(j)" siblings. Roman classification is the
+    # default per _LEVEL_PATTERNS; alphabetical context is a structural
+    # exception driven by sibling sequence, not by marker shape alone.
+    sections = _reclassify_letter_i_to_alphabetical(sections)
+    # Drop cover-page records BEFORE the L0 title (registrant short-name,
+    # exhibit-number echoes). These are filing metadata wedged between
+    # the SEC envelope and the agreement body.
+    sections = _drop_pre_title_cover_records(sections)
+    # Merge fragmented signature-block records so each party's signature
+    # block is ONE record (symmetric across all parties).
+    sections = _merge_signature_blocks(sections)
     sections = _sort_records_by_source_position(sections, idx)
 
     base["parse_status"] = "ok"

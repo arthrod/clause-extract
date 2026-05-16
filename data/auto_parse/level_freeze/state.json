@@ -1,5 +1,5 @@
 {
-  "current_idx": 35,
+  "current_idx": 73,
   "frozen": [
     0,
     1,
@@ -35,7 +35,45 @@
     31,
     32,
     33,
-    34
+    34,
+    35,
+    36,
+    37,
+    38,
+    39,
+    40,
+    41,
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    48,
+    49,
+    50,
+    51,
+    52,
+    53,
+    54,
+    55,
+    56,
+    57,
+    58,
+    59,
+    60,
+    61,
+    62,
+    63,
+    64,
+    65,
+    66,
+    67,
+    68,
+    69,
+    70,
+    71,
+    72
   ],
   "history": [
     {
@@ -542,6 +580,480 @@
       "action": "advance",
       "from_idx": 34,
       "to_idx": 35
+    },
+    {
+      "ts": "2026-05-10T03:28:54",
+      "action": "freeze",
+      "idx": 35,
+      "n_records": 37
+    },
+    {
+      "ts": "2026-05-10T03:28:54",
+      "action": "advance",
+      "from_idx": 35,
+      "to_idx": 36
+    },
+    {
+      "ts": "2026-05-10T03:34:34",
+      "action": "freeze",
+      "idx": 36,
+      "n_records": 72
+    },
+    {
+      "ts": "2026-05-10T03:35:05",
+      "action": "advance",
+      "from_idx": 36,
+      "to_idx": 37
+    },
+    {
+      "ts": "2026-05-10T03:47:45",
+      "action": "freeze",
+      "idx": 37,
+      "n_records": 40
+    },
+    {
+      "ts": "2026-05-10T03:47:45",
+      "action": "advance",
+      "from_idx": 37,
+      "to_idx": 38
+    },
+    {
+      "ts": "2026-05-10T03:55:35",
+      "action": "freeze",
+      "idx": 38,
+      "n_records": 23
+    },
+    {
+      "ts": "2026-05-10T03:56:13",
+      "action": "freeze",
+      "idx": 38,
+      "n_records": 23
+    },
+    {
+      "ts": "2026-05-10T03:56:13",
+      "action": "advance",
+      "from_idx": 38,
+      "to_idx": 39
+    },
+    {
+      "ts": "2026-05-10T04:04:52",
+      "action": "freeze",
+      "idx": 39,
+      "n_records": 71
+    },
+    {
+      "ts": "2026-05-10T04:04:52",
+      "action": "advance",
+      "from_idx": 39,
+      "to_idx": 40
+    },
+    {
+      "ts": "2026-05-10T04:13:31",
+      "action": "freeze",
+      "idx": 40,
+      "n_records": 13
+    },
+    {
+      "ts": "2026-05-10T04:13:31",
+      "action": "advance",
+      "from_idx": 40,
+      "to_idx": 41
+    },
+    {
+      "ts": "2026-05-10T04:20:20",
+      "action": "freeze",
+      "idx": 41,
+      "n_records": 6
+    },
+    {
+      "ts": "2026-05-10T04:20:20",
+      "action": "advance",
+      "from_idx": 41,
+      "to_idx": 42
+    },
+    {
+      "ts": "2026-05-10T04:27:36",
+      "action": "freeze",
+      "idx": 42,
+      "n_records": 4
+    },
+    {
+      "ts": "2026-05-10T04:27:37",
+      "action": "advance",
+      "from_idx": 42,
+      "to_idx": 43
+    },
+    {
+      "ts": "2026-05-10T04:31:08",
+      "action": "freeze",
+      "idx": 43,
+      "n_records": 226
+    },
+    {
+      "ts": "2026-05-10T04:31:23",
+      "action": "advance",
+      "from_idx": 43,
+      "to_idx": 44
+    },
+    {
+      "ts": "2026-05-10T04:38:26",
+      "action": "freeze",
+      "idx": 44,
+      "n_records": 11
+    },
+    {
+      "ts": "2026-05-10T04:38:26",
+      "action": "advance",
+      "from_idx": 44,
+      "to_idx": 45
+    },
+    {
+      "ts": "2026-05-10T04:45:03",
+      "action": "freeze",
+      "idx": 45,
+      "n_records": 13
+    },
+    {
+      "ts": "2026-05-10T04:45:04",
+      "action": "advance",
+      "from_idx": 45,
+      "to_idx": 46
+    },
+    {
+      "ts": "2026-05-10T04:52:02",
+      "action": "freeze",
+      "idx": 46,
+      "n_records": 40
+    },
+    {
+      "ts": "2026-05-10T04:52:02",
+      "action": "advance",
+      "from_idx": 46,
+      "to_idx": 47
+    },
+    {
+      "ts": "2026-05-10T04:57:03",
+      "action": "freeze",
+      "idx": 47,
+      "n_records": 227
+    },
+    {
+      "ts": "2026-05-10T04:57:16",
+      "action": "advance",
+      "from_idx": 47,
+      "to_idx": 48
+    },
+    {
+      "ts": "2026-05-10T05:02:19",
+      "action": "freeze",
+      "idx": 48,
+      "n_records": 6
+    },
+    {
+      "ts": "2026-05-10T05:03:45",
+      "action": "freeze",
+      "idx": 48,
+      "n_records": 6
+    },
+    {
+      "ts": "2026-05-10T05:03:45",
+      "action": "advance",
+      "from_idx": 48,
+      "to_idx": 49
+    },
+    {
+      "ts": "2026-05-10T05:09:58",
+      "action": "freeze",
+      "idx": 49,
+      "n_records": 6
+    },
+    {
+      "ts": "2026-05-10T05:09:58",
+      "action": "advance",
+      "from_idx": 49,
+      "to_idx": 50
+    },
+    {
+      "ts": "2026-05-10T05:16:11",
+      "action": "freeze",
+      "idx": 50,
+      "n_records": 106
+    },
+    {
+      "ts": "2026-05-10T05:16:12",
+      "action": "advance",
+      "from_idx": 50,
+      "to_idx": 51
+    },
+    {
+      "ts": "2026-05-10T05:19:20",
+      "action": "freeze",
+      "idx": 51,
+      "n_records": 19
+    },
+    {
+      "ts": "2026-05-10T05:19:42",
+      "action": "advance",
+      "from_idx": 51,
+      "to_idx": 52
+    },
+    {
+      "ts": "2026-05-10T05:26:20",
+      "action": "freeze",
+      "idx": 52,
+      "n_records": 75
+    },
+    {
+      "ts": "2026-05-10T05:26:20",
+      "action": "advance",
+      "from_idx": 52,
+      "to_idx": 53
+    },
+    {
+      "ts": "2026-05-10T05:32:33",
+      "action": "freeze",
+      "idx": 53,
+      "n_records": 131
+    },
+    {
+      "ts": "2026-05-10T05:32:33",
+      "action": "advance",
+      "from_idx": 53,
+      "to_idx": 54
+    },
+    {
+      "ts": "2026-05-10T05:53:08",
+      "action": "freeze",
+      "idx": 54,
+      "n_records": 7
+    },
+    {
+      "ts": "2026-05-10T05:53:09",
+      "action": "advance",
+      "from_idx": 54,
+      "to_idx": 55
+    },
+    {
+      "ts": "2026-05-10T05:59:22",
+      "action": "freeze",
+      "idx": 55,
+      "n_records": 75
+    },
+    {
+      "ts": "2026-05-10T05:59:23",
+      "action": "advance",
+      "from_idx": 55,
+      "to_idx": 56
+    },
+    {
+      "ts": "2026-05-10T06:03:04",
+      "action": "freeze",
+      "idx": 56,
+      "n_records": 31
+    },
+    {
+      "ts": "2026-05-10T06:05:26",
+      "action": "advance",
+      "from_idx": 56,
+      "to_idx": 57
+    },
+    {
+      "ts": "2026-05-10T06:11:44",
+      "action": "freeze",
+      "idx": 57,
+      "n_records": 7
+    },
+    {
+      "ts": "2026-05-10T06:11:45",
+      "action": "advance",
+      "from_idx": 57,
+      "to_idx": 58
+    },
+    {
+      "ts": "2026-05-10T06:17:58",
+      "action": "freeze",
+      "idx": 58,
+      "n_records": 7
+    },
+    {
+      "ts": "2026-05-10T06:17:58",
+      "action": "advance",
+      "from_idx": 58,
+      "to_idx": 59
+    },
+    {
+      "ts": "2026-05-10T06:24:11",
+      "action": "freeze",
+      "idx": 59,
+      "n_records": 25
+    },
+    {
+      "ts": "2026-05-10T06:24:12",
+      "action": "advance",
+      "from_idx": 59,
+      "to_idx": 60
+    },
+    {
+      "ts": "2026-05-10T06:30:38",
+      "action": "freeze",
+      "idx": 60,
+      "n_records": 85
+    },
+    {
+      "ts": "2026-05-10T06:30:50",
+      "action": "advance",
+      "from_idx": 60,
+      "to_idx": 61
+    },
+    {
+      "ts": "2026-05-10T06:37:24",
+      "action": "freeze",
+      "idx": 61,
+      "n_records": 128
+    },
+    {
+      "ts": "2026-05-10T06:37:25",
+      "action": "advance",
+      "from_idx": 61,
+      "to_idx": 62
+    },
+    {
+      "ts": "2026-05-10T06:43:23",
+      "action": "freeze",
+      "idx": 62,
+      "n_records": 59
+    },
+    {
+      "ts": "2026-05-10T06:43:38",
+      "action": "freeze",
+      "idx": 62,
+      "n_records": 59
+    },
+    {
+      "ts": "2026-05-10T06:43:39",
+      "action": "advance",
+      "from_idx": 62,
+      "to_idx": 63
+    },
+    {
+      "ts": "2026-05-10T06:48:04",
+      "action": "freeze",
+      "idx": 63,
+      "n_records": 193
+    },
+    {
+      "ts": "2026-05-10T06:48:26",
+      "action": "advance",
+      "from_idx": 63,
+      "to_idx": 64
+    },
+    {
+      "ts": "2026-05-10T06:58:56",
+      "action": "freeze",
+      "idx": 64,
+      "n_records": 59
+    },
+    {
+      "ts": "2026-05-10T06:58:57",
+      "action": "advance",
+      "from_idx": 64,
+      "to_idx": 65
+    },
+    {
+      "ts": "2026-05-10T07:02:38",
+      "action": "freeze",
+      "idx": 65,
+      "n_records": 208
+    },
+    {
+      "ts": "2026-05-10T07:02:45",
+      "action": "advance",
+      "from_idx": 65,
+      "to_idx": 66
+    },
+    {
+      "ts": "2026-05-10T07:09:11",
+      "action": "freeze",
+      "idx": 66,
+      "n_records": 21
+    },
+    {
+      "ts": "2026-05-10T07:09:12",
+      "action": "advance",
+      "from_idx": 66,
+      "to_idx": 67
+    },
+    {
+      "ts": "2026-05-10T07:15:26",
+      "action": "freeze",
+      "idx": 67,
+      "n_records": 68
+    },
+    {
+      "ts": "2026-05-10T07:15:27",
+      "action": "advance",
+      "from_idx": 67,
+      "to_idx": 68
+    },
+    {
+      "ts": "2026-05-10T07:21:42",
+      "action": "freeze",
+      "idx": 68,
+      "n_records": 483
+    },
+    {
+      "ts": "2026-05-10T07:21:43",
+      "action": "advance",
+      "from_idx": 68,
+      "to_idx": 69
+    },
+    {
+      "ts": "2026-05-10T07:29:56",
+      "action": "freeze",
+      "idx": 69,
+      "n_records": 9
+    },
+    {
+      "ts": "2026-05-10T07:29:57",
+      "action": "advance",
+      "from_idx": 69,
+      "to_idx": 70
+    },
+    {
+      "ts": "2026-05-10T07:36:11",
+      "action": "freeze",
+      "idx": 70,
+      "n_records": 10
+    },
+    {
+      "ts": "2026-05-10T07:36:12",
+      "action": "advance",
+      "from_idx": 70,
+      "to_idx": 71
+    },
+    {
+      "ts": "2026-05-10T07:42:26",
+      "action": "freeze",
+      "idx": 71,
+      "n_records": 32
+    },
+    {
+      "ts": "2026-05-10T07:42:27",
+      "action": "advance",
+      "from_idx": 71,
+      "to_idx": 72
+    },
+    {
+      "ts": "2026-05-10T07:48:41",
+      "action": "freeze",
+      "idx": 72,
+      "n_records": 8
+    },
+    {
+      "ts": "2026-05-10T07:48:43",
+      "action": "advance",
+      "from_idx": 72,
+      "to_idx": 73
     }
   ]
 }

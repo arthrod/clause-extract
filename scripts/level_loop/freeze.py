@@ -39,8 +39,14 @@ DATA = REPO / "data" / "auto_parse"
 STATE_PATH = DATA / "level_freeze" / "state.json"
 FROZEN_DIR = DATA / "level_freeze" / "frozen"
 NODES_JSONL = DATA / "parse_doc2dict_with_config_nodes.jsonl"
+SOT_JSONL = DATA / "parse_source_of_truth.jsonl"
 PARSER_SRC = REPO / "scripts" / "parse_doc2dict_with_config.py"
 CONFIG_SRC = REPO / "src" / "clause_extract" / "agreement_config.py"
+
+# Reconstruction-faithfulness thresholds (per docs/DECISIONS.md §10).
+# Non-blocking — these emit warnings only, never refuse a freeze.
+_RECON_SOFT_BAR_PCT = 95.0  # below this -> soft WARN
+_RECON_HARD_BAR_PCT = 80.0  # below this -> hard WARN (still non-blocking)
 
 console = Console()
 
@@ -294,6 +300,108 @@ def _check_monkey_patches(parser_src: str) -> list[str]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Reconstruction-faithfulness measurement (non-blocking warning)
+#
+# The parser's only goal is to slice the source HTML such that concatenating
+# the spans for one idx in JSONL line order reconstructs the source. We
+# measure that with two metrics matching scripts/measure_reconstruction.py:
+#
+#   word_coverage_pct(idx) =
+#       |source_words ∩ reconstructed_words| / |source_words| × 100
+#
+#   char_ratio_pct(idx) =
+#       len(reconstructed_norm) / len(source_norm) × 100
+#
+# where the normaliser lowercases and collapses whitespace. The freeze
+# itself does NOT block on low coverage — see task_rules/freeze_command.md
+# for why this is informational. The bars come from docs/DECISIONS.md §10.
+# ---------------------------------------------------------------------------
+
+
+def _normalize_text(text: str) -> str:
+    """Lowercase + whitespace-collapse for word-set / char-len comparison."""
+    return " ".join((text or "").lower().split())
+
+
+def _read_sot_span_clean(idx: int) -> str | None:
+    """Read parse_source_of_truth.jsonl[idx].span_clean. None if missing."""
+    if not SOT_JSONL.exists():
+        return None
+    for line in SOT_JSONL.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if rec.get("idx") == idx:
+            return rec.get("span_clean") or ""
+    return None
+
+
+def _measure_reconstruction(idx: int, records: list[dict]) -> dict | None:
+    """Compute word coverage + char ratio for one idx. None if no SoT row."""
+    source = _read_sot_span_clean(idx)
+    if source is None:
+        return None
+    reconstructed = "".join((r.get("span") or "") for r in records)
+    source_norm = _normalize_text(source)
+    recon_norm = _normalize_text(reconstructed)
+    source_words = set(source_norm.split())
+    recon_words = set(recon_norm.split())
+    if not source_words:
+        return None
+    inter = source_words & recon_words
+    word_cov = len(inter) / len(source_words) * 100
+    char_ratio = (len(recon_norm) / len(source_norm) * 100) if source_norm else 0.0
+    missing = source_words - recon_words
+    return {
+        "word_coverage_pct": word_cov,
+        "char_ratio_pct": char_ratio,
+        "n_source_words": len(source_words),
+        "n_missing_words": len(missing),
+        "sample_missing": sorted(missing)[:8],
+    }
+
+
+def _emit_reconstruction_warn(idx: int, records: list[dict]) -> None:
+    """Print a non-blocking reconstruction warning (or OK line) for idx."""
+    m = _measure_reconstruction(idx, records)
+    if m is None:
+        console.print(
+            "  [dim]reconstruction: no source-of-truth row available for "
+            f"idx={idx} (skipping check)[/dim]"
+        )
+        return
+    wc = m["word_coverage_pct"]
+    cr = m["char_ratio_pct"]
+    if wc >= _RECON_SOFT_BAR_PCT:
+        console.print(
+            f"  reconstruction OK: word_coverage={wc:.1f}% "
+            f"char_ratio={cr:.1f}% (≥ {_RECON_SOFT_BAR_PCT:.0f}% bar)"
+        )
+        return
+    if wc >= _RECON_HARD_BAR_PCT:
+        console.print(
+            f"  [yellow]WARN: reconstruction word_coverage={wc:.1f}% "
+            f"(< {_RECON_SOFT_BAR_PCT:.0f}% soft bar; non-blocking)[/yellow]"
+        )
+    else:
+        console.print(
+            f"  [red]WARN [hard]: reconstruction word_coverage={wc:.1f}% "
+            f"(< {_RECON_HARD_BAR_PCT:.0f}% hard bar; still non-blocking)[/red]"
+        )
+    console.print(
+        f"    char_ratio={cr:.1f}%  missing {m['n_missing_words']} of "
+        f"{m['n_source_words']} unique source words"
+    )
+    if m["sample_missing"]:
+        console.print(
+            f"    sample missing words: {m['sample_missing']}"
+        )
+
+
 def validate_records(records: list[dict]) -> list[str]:
     """Return a list of human-readable rubric violations for `records`.
 
@@ -447,6 +555,12 @@ def main(
             f"[yellow]{out_path} already exists. Pass --force to overwrite.[/yellow]"
         )
         raise typer.Exit(code=2)
+
+    # Non-blocking reconstruction warning. The parser's stated goal is
+    # that concat-of-spans reconstructs the source; we surface a warning
+    # when this idx's coverage is below the project bar but do NOT refuse
+    # the freeze on it. See task_rules/freeze_command.md.
+    _emit_reconstruction_warn(idx, records)
 
     FROZEN_DIR.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as f:

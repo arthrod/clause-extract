@@ -9,7 +9,7 @@ manually first to see specific diffs if something fails.
 ## Command (copy-paste from repo root)
 
 ```bash
-cd /Users/arthrod/temp/T/clause-extract/clause-extract
+cd /Users/arthrod/temp/T/clause-extract
 uv run scripts/level_loop/regress.py             # check every frozen idx
 # OR
 uv run scripts/level_loop/regress.py --idx 0     # check just one

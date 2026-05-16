@@ -39,20 +39,30 @@ About-Company, forward-looking statements, contact blocks). See
 ## Rubric: nesting depth 0–7
 
 `level` in each JSONL record is the clause's nesting depth in the
-agreement's structural hierarchy. Standalone agreement (no
-subdocuments):
+agreement's structural hierarchy. Each record also carries `order`
+— a 0-indexed sequence number within the idx, document order — so
+consumers can reconstruct the linear sequence without relying on
+JSON key ordering. Standalone agreement (no subdocuments):
 
-  - Depth 0  →  the agreement itself (single root: title + preamble)
-  - Depth 1  →  top-level headings and recital blocks (party / exhibit
-                metadata, WITNESSETH/WHEREAS recitals, signature block)
-  - Depth 2  →  numbered Sections: "1.", "2.", "10.", "Section 1.1"
-  - Depth 3  →  lettered subsections: "(a)", "(b)", "(c)"
-  - Depth 4  →  sub-sub items: "(i)", "(ii)", "(A)", "(B)", "(1)", "(2)"
+  - Depth 0  →  the agreement **title alone** (exactly one record per
+                idx). The preamble is NOT depth 0.
+  - Depth 1  →  every direct child of the agreement: the preamble
+                paragraph, the recitals block, **each top-level body
+                clause** (Article when the doc uses Article/Section
+                nesting, otherwise the numbered Section), and the
+                signature block.
+  - Depth 2  →  direct children of L1 clauses: Section under Article,
+                or lettered "(a)/(b)/(c)" subsection under a top
+                Section.
+  - Depth 3  →  direct children of L2 clauses: lettered "(a)" under
+                Section-under-Article, or roman/letter/digit items
+                "(i)/(A)/(1)" under "(a)".
+  - Depth 4+ →  deeper nesting.
 
 Subdocument penalty: each attached subdocument (cls=exhibit/schedule/
-appendix/annex with content, NOT the SEC envelope) adds +1 to every
-descendant's depth. Ceiling 7. See `task_rules/level_rubric.md` for
-full details and worked examples.
+appendix/annex with descriptive title, NOT the SEC envelope) adds +1
+to every descendant's depth. Ceiling 7. See
+`task_rules/level_rubric.md` for full details and worked examples.
 
 If the document is structurally flat (a one-page release, a unilateral
 designation, a form with numbered fields), the deeper depths may
@@ -66,11 +76,11 @@ extraction of each source HTML. The reconstruction test:
 concat-of-spans for one idx ≈ `span_clean[idx]`.
 
 `scripts/measure_reconstruction.py` computes per-idx word coverage
-and char ratio. The freeze step emits a non-blocking WARN if word
-coverage drops below 95% or 80% (project bars from
-`docs/DECISIONS.md` §10), but it does NOT refuse the freeze. The
-warning surfaces in this prompt's attempt history if a prior dispatch
-left a flagged idx, so future runs can investigate.
+and char ratio. The freeze step **refuses** the freeze if word
+coverage for this idx is below 90% (project bar from
+`docs/DECISIONS.md` §10). A reconstruction failure is on equal
+footing with a rubric violation: fix the parser so spans recover
+the source words, then re-run the parser and freeze again.
 
 ## Current state
 
@@ -123,21 +133,24 @@ full JSONL has the unbounded text.)
 
      uv run scripts/measure_reconstruction.py --idx {current_idx}
 
-   Read the word coverage and char ratio for idx={current_idx}. If
-   word coverage is below 95%, briefly diagnose: are spans missing
-   content, or is the source-of-truth picking up extra whitespace?
-   Low coverage is a non-blocking warning, not a freeze failure, but
-   it tells you whether your slicing is faithful to the source.
+   Read the word coverage and char ratio for idx={current_idx}. **Word
+   coverage < 90% is a HARD FAIL at freeze time** (per
+   `docs/DECISIONS.md` §10). If you're below 90%, the parser dropped
+   real content; find the missing words in the source, locate the
+   record(s) that should have captured them, and fix the slicing.
 
 6. Freeze the corrected output:
 
      uv run scripts/level_loop/freeze.py {current_idx}
 
-   freeze.py validates the rubric (exactly 1 depth-0, max depth ≤ 7,
-   no envelope as first record, no filing-trailer phrases, no
-   forbidden monkey-patch constructs in the parser source) AND emits
-   a non-blocking reconstruction warning. A warning is informational;
-   only the rubric/monkey-patch violations refuse the freeze.
+   freeze.py validates the rubric (exactly 1 depth-0 — the title
+   alone, max depth ≤ 7, no envelope as first record, monotonic
+   `order`, no filing-trailer phrases, no forbidden monkey-patch
+   constructs in the parser source) AND enforces the **90%
+   reconstruction gate**. Below 90% word coverage → freeze refused.
+   The error message includes the percentage, char ratio, count of
+   missing words, and a sample of the missing words; use that to
+   localize what got dropped, then fix the parser slicing and retry.
 
 7. Regression check:
 

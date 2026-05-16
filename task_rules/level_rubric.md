@@ -6,12 +6,10 @@ Slice each agreement's HTML into clauses with hierarchy — clause **text**
 plus structural **nesting depth** — so that concatenating the slices in
 document order reconstructs the source document faithfully.
 
-That single criterion drives parser quality. Levels exist to capture
-nesting depth; depths exist to make hierarchy explicit. Everything else
-(canonical schema, subdocument detection, classification, statistics) is
-downstream. If concat-of-spans doesn't reproduce the source for an idx,
-the parser is wrong for that idx — regardless of how clever its level
-assignments look.
+That single criterion drives parser quality. The `level` field is the
+clause's 0-indexed nesting depth. If concat-of-spans doesn't reproduce
+the source for an idx, the parser is wrong for that idx — regardless of
+how clever its depth assignments look.
 
 ## Scope: every kind of agreement is in scope
 
@@ -28,55 +26,111 @@ in-scope and should be parsed by the same rubric:
     party makes a binding promise.
   - Multilateral and complex tri-party agreements.
 
-The structural patterns the parser detects (numbered Sections,
-lettered subsections, signature lines, attached subdocuments) are
-common across all of these. Don't add document-class-specific code
-paths; the structural patterns themselves are document-class neutral.
-
 What's *not* in scope is **non-agreement metadata** — see
 [`scope_rule.md`](scope_rule.md). That's filing-context content
 surrounding the agreement (the SEC `<DOCUMENT>` envelope, post-
-signature filing trailers like press releases or company
-boilerplate). Those get tagged `scope="trailer"` and stay out of
-the JSONL; they do not affect which agreement types we accept.
+signature filing trailers like press releases or company boilerplate).
+Those get tagged `scope="trailer"` and stay out of the JSONL; they do
+not affect which agreement types we accept.
+
+## Title is the root of the agreement
+
+The agreement's **title** is its identifier. It is the semantic root
+of the agreement's tree. Every clause in the agreement is a descendant
+of the title; depth is measured by ancestry from the title down.
+
+This gives the scope rule a single, purely structural criterion:
+
+> **If a record cannot be placed as a descendant of the agreement
+> title, it is not part of the agreement.**
+
+No phrase matching. No case-by-case scope judgment. The model handles
+the awkward edges cleanly:
+
+  - **Pre-title cover wedges** — registrant short name, exhibit tag,
+    filing date stamp, anything that appears BEFORE the agreement title
+    in document order. The title doesn't yet exist at that point, so
+    these can't descend from it. → out of scope. Dropped from the JSONL.
+  - **Post-signature filing trailers** — press releases, forward-
+    looking-statement boilerplate, contact-info blocks, page footers.
+    They appear AFTER the signature subtree, which is the agreement's
+    last L1 descendant. They sit outside the title's subtree. → out of
+    scope.
+  - **Real attached subdocuments** — "EXHIBIT A — FORM OF NOTICE",
+    "SCHEDULE 2 — DEFINITIONS", an "ANNEX I" addendum. They appear
+    inside the agreement body, attached to or referenced by the main
+    agreement. They DO descend from the title. → in scope, with a +1
+    depth penalty (see "Subdocument depth penalty" below).
+
+### Why the word "Exhibit" can be in OR out of scope
+
+Both the SEC filing envelope ("EXHIBIT 10.25") and a real attached
+subdocument ("EXHIBIT A — FORM OF NOTICE") use the word "EXHIBIT".
+They are different things, distinguished by **structure**, not by the
+word:
+
+| feature                  | "EXHIBIT 10.25" (envelope) | "EXHIBIT A" (attached subdoc)          |
+|--------------------------|----------------------------|-----------------------------------------|
+| position in document     | BEFORE the agreement title | AFTER / inside the main body            |
+| body                     | empty (just the tag)       | substantive (form text, defined terms)  |
+| `cls`                    | `exhibit`                  | `exhibit`                               |
+| `is_envelope`            | `True`                     | `False`                                 |
+| descended from title?    | NO (precedes title)        | YES (referenced by / attached to body)  |
+| in JSONL?                | DROPPED                    | INCLUDED, +1 depth penalty              |
+
+Same word, opposite scope decisions, decided structurally. The parser
+does not blocklist "EXHIBIT" or any phrase; it inspects descent from
+the title.
 
 ## JSONL record shape
 
 The parser at `scripts/parse_doc2dict_with_config.py` emits one JSONL
-record per parsed unit. Each record has exactly three keys:
+record per parsed unit. Each record has exactly four keys:
 
 ```json
-{"idx": <int>, "level": <int>, "span": "<heading>\n<body>"}
+{"idx": <int>, "order": <int>, "level": <int>, "span": "<heading>\n<body>"}
 ```
 
   - `idx` — corpus row index.
+  - `order` — 0-indexed sequence number *within* this idx, in document
+    order. The first emitted record for idx=N has `order=0`, the next
+    has `order=1`, and so on. JSON dicts are not ordered; `order`
+    makes the document sequence explicit so downstream consumers can
+    reconstruct it regardless of how the JSONL was loaded.
   - `level` — **nesting depth** (0-indexed) of this clause within the
-    agreement's structural hierarchy. The mapping below is the contract.
+    agreement's structural hierarchy. The mapping below is the
+    contract.
   - `span` — heading + body verbatim. Concatenating all `span` values
-    for one `idx` in JSONL line order should reconstruct the source
+    for one `idx` in `order` ascending should reconstruct the source
     document's clause text.
 
 ## Nesting depths for a standalone agreement (no subdocuments)
 
 | depth | what it represents | examples |
 |-------|--------------------|----------|
-| 0     | the agreement itself: title line + preamble | "INDEMNIFICATION AGREEMENT\nTHIS INDEMNIFICATION AGREEMENT (the 'Agreement') is made…" |
-| 1     | top-level headings and recital blocks: party / exhibit metadata, WHEREAS recitals, signature block | "ULURU Inc.", "WITNESSETH THAT:\nWHEREAS…", "INDEMNITEE", "/s/ Vaidehi Shah" |
-| 2     | numbered Sections | "1. Indemnity of Indemnitee", "2. Additional Indemnity", "Section 6", "10." |
-| 3     | lettered subsections | "(a) Proceedings…", "(b)…", "(c)…" |
-| 4     | sub-sub items | "(i)", "(ii)", "(A)", "(B)", "(1)", "(2)" |
-| 5     | deeper roman/letter nesting inside 4-depth items | rare in EX-10s but possible |
+| 0     | the agreement **title** alone, exactly ONE record per idx | "INDEMNIFICATION AGREEMENT", "CREDIT AGREEMENT", "DESIGNATION OF AGENT AGREEMENT" |
+| 1     | every direct child of the agreement — preamble paragraph, recital block, top-level body clauses, signature block | "THIS INDEMNIFICATION AGREEMENT (the 'Agreement') is made…", "WITNESSETH THAT: WHEREAS…", "1. Indemnity of Indemnitee", "ARTICLE I — DEFINITIONS", "/s/ Vaidehi Shah" |
+| 2     | direct child of an L1 clause — Sections under an Article, or lettered subsections under a top Section | "Section 1.1 Definitions" (under ARTICLE I), "(a) Proceedings Other Than…" (under "1. Indemnity") |
+| 3     | direct child of an L2 clause — lettered under Sections-under-Articles, or roman/letter/digit items under (a) | "(a) Definitions" (under Section 1.1), "(i) by a majority vote…" (under "(a) Proceedings") |
+| 4     | direct child of an L3 clause | rare; deeper roman/letter/digit nesting |
+| 5     | direct child of an L4 clause | very rare |
 | 6     | depth 5 inside a subdocument (penalty +1) — see below | |
 | 7     | depth 6 inside a subdocument | |
 
+The **first top-level body clause** sits at depth 1 — whether that
+clause is an Article (in agreements that use Article/Section nesting)
+or a Section (in agreements that go straight to numbered Sections). Its
+children are at depth 2. The depth is determined by structural
+ancestry, not by what the clause is *called*.
+
 For documents with a flatter structure (a form, a one-page release, a
 unilateral designation), the deeper depths may simply not appear —
-that's correct, not a defect. The depths capture the structure that
-exists in the source. Don't force depth that isn't there.
+that's correct, not a defect. The depths capture structure that exists
+in the source. Don't synthesise depth that isn't there.
 
 ## SEC envelope drop rule
 
-SEC EDGAR filings wrap each EX-10 contract in a `<DOCUMENT>` envelope
+SEC EDGAR filings wrap each EX-10 agreement in a `<DOCUMENT>` envelope
 whose first visible line is the exhibit number, e.g.:
 
 ```
@@ -106,55 +160,56 @@ Each level of subdocument nesting adds **+1** to the depth of every
 descendant. The subdocument header itself sits at depth 1 of the
 enclosing document (or higher if itself nested).
 
-Example: if a section pattern matches "(a)" inside a top-level
-subdocument, its inferred depth is 3 (lettered subsection) and its
-emitted depth is `3 + 1 = 4`. If the same "(a)" appears inside an
-exhibit-inside-an-exhibit, the emitted depth is `3 + 2 = 5`.
+Example: a top-level Section inside a subdocument starts as depth 1
+under its enclosing subdoc structure; the +1 subdoc penalty bumps it
+to depth 2. A lettered `(a)` subsection inside that Section is depth
+2 → 3. A `(i)` further inside is depth 3 → 4. For a subdoc inside a
+subdoc, add +2; for three levels of subdoc nesting, +3 (ceiling 7).
 
-The rule extends the rubric naturally up to depth 7:
-
-| context                                  | (a) becomes | (i) becomes |
-|------------------------------------------|-------------|-------------|
-| main agreement                           | 3           | 4           |
-| inside one subdocument                   | 4           | 5           |
-| inside subdoc-inside-subdoc              | 5           | 6           |
-| inside subdoc-inside-subdoc-inside-subdoc | 6           | 7           |
+| context                                     | first body clause | (a) becomes | (i) becomes |
+|---------------------------------------------|-------------------|-------------|-------------|
+| main agreement                              | 1                 | 2           | 3           |
+| inside one subdocument                      | 2                 | 3           | 4           |
+| inside subdoc-inside-subdoc                 | 3                 | 4           | 5           |
+| inside subdoc-inside-subdoc-inside-subdoc   | 4                 | 5           | 6           |
 
 Three levels of subdoc nesting is the practical ceiling — most filings
-top out at one level (a single attached exhibit). The rubric supports
-deeper.
+top out at one level. The rubric supports deeper through depth 7.
 
 ## What "matches the rubric" means in practice
 
 Run the parser, look at the JSONL for the current idx, and check:
 
-1. **Exactly ONE depth-0 record per idx** — the agreement's title +
-   preamble. Multiple depth-0s indicate the parser misread the
-   document structure (split into multiple roots, or captured a
-   filing trailer as a second "agreement").
+1. **Exactly ONE depth-0 record per idx** — the agreement's title
+   alone. Multiple depth-0s indicate the parser misread the document
+   structure (split into multiple roots, or captured a filing trailer
+   as a second "agreement"). Zero depth-0s means the parser failed to
+   identify the title.
 2. **Max depth ≤ 7.** Anything higher means the parser captured noise
    (post-signature trailer boilerplate, page-footer artifacts).
 3. **The first record is not the SEC envelope marker.** "EXHIBIT
    10.25" with no body should be dropped (envelope detection).
-4. **No filing-trailer boilerplate captured.** See
+4. **`order` is monotonic** within each idx (0, 1, 2, …) and matches
+   document order — first emitted span is `order=0`.
+5. **No filing-trailer boilerplate captured.** See
    [`scope_rule.md`](scope_rule.md) for what "filing trailer" means
    and how it's filtered structurally.
 
 The depth distribution is whatever the document's structure produces.
-A flat unilateral designation will have mostly depth-1 records and no
-depth-2/3/4 records — that is correct.
+A flat unilateral designation will have one depth-0, several depth-1
+records, and maybe nothing deeper — that is correct.
 
-## Reconstruction faithfulness — the underlying bar
+## Reconstruction faithfulness — the blocking gate
 
-The rubric checks above (1 L0, max ≤ 7, etc.) are necessary but not
-sufficient. The real test is reconstruction: take all spans for one
-idx in JSONL line order, concatenate them, and compare to
+The rubric checks above are necessary but not sufficient. The real test
+is reconstruction: take all spans for one idx ordered by `order`,
+concatenate them, and compare to
 `parse_source_of_truth.jsonl[idx].span_clean` (the bs4 plain-text
 extraction of the source HTML).
 
 Two measurements (computed by
 [`scripts/measure_reconstruction.py`](../scripts/measure_reconstruction.py)
-and surfaced as a non-blocking warning by `freeze.py`):
+and enforced by `freeze.py`):
 
   - **word coverage**: |source_words ∩ reconstructed_words| /
     |source_words| × 100. 100% means every unique word in the source
@@ -164,22 +219,20 @@ and surfaced as a non-blocking warning by `freeze.py`):
     below means content was dropped; far above means content was
     duplicated.
 
-Project-level bar (from
-[`../docs/DECISIONS.md`](../docs/DECISIONS.md) §10): mean word
-coverage ≥ 95% across the corpus, no doc below 80%. Per-idx
-reconstruction below the bar is a warning, not a blocker — the freeze
-still goes through, but the warning surfaces in the freeze output and
-in the next dispatch's attempt-history banner so the agent can
-investigate before moving on.
+Project bar (from [`../docs/DECISIONS.md`](../docs/DECISIONS.md) §10):
+**word coverage ≥ 90% per idx.** `freeze.py` enforces this as a
+**blocking gate** — a per-idx reconstruction below 90% refuses the
+freeze and prints the missing-word sample so the agent can localize
+the gap. The bar is per-idx, not just per-corpus, so individual
+baselines can't sneak in below the line.
 
 ## See also
 
 - [`examples_main_agreement.md`](examples_main_agreement.md) — fully
-  worked example for a typical Indemnification Agreement.
+  worked example for a typical Indemnification Agreement (no subdocs).
 - [`examples_with_subdocs.md`](examples_with_subdocs.md) — fully
-  worked example showing the +1 penalty in action.
+  worked example showing the +1 subdocument penalty in action.
 - [`scope_rule.md`](scope_rule.md) — agreement-vs-trailer
   classification using the structural scope rule.
 - [`freeze_command.md`](freeze_command.md) — what the freeze
-  validator checks and what the non-blocking reconstruction warning
-  tells you.
+  validator checks and the 90% reconstruction gate.

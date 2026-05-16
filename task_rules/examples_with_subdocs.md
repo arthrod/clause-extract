@@ -5,142 +5,120 @@ SYNTHETIC — built to exercise every nesting depth from 0 through 7
 (the `level` field in JSONL records). The actual SEC corpus rarely
 goes deeper than depth 5, but the parser supports the full range.
 
+The example uses the same structural rules as the main-agreement
+example: title alone at depth 0, every direct child of the agreement
+at depth 1, their children at depth 2, etc. The subdocument penalty
+adds +1 to every descendant of a real subdocument (cls in
+`{exhibit, schedule, appendix, annex}`, `is_envelope=False`, with
+descriptive title text).
+
 ## Source structure (synthetic agreement with nested subdocs)
 
 ```
-[SEC envelope, dropped from JSONL]
-EXHIBIT 10.99
+[main agreement body]
+MASTER AGREEMENT
+THIS MASTER AGREEMENT… (preamble)
+RECITALS
+1. Term and Termination
+  (a) Initial Term…
+  (b) Renewal…
+2. Definitions
+3. Confidentiality
 
-[main contract]
-ACME CO.
-SHAREHOLDERS AGREEMENT
-THIS SHAREHOLDERS AGREEMENT…
+[1st-level subdoc]
+EXHIBIT A — FORM OF NOTICE
+1. Scope of Notice
+  (a) Required Recipients
+    (i) by certified mail…
+      (A) addressed to "Chief Officer"
+        (1) with delivery confirmation
 
-WITNESSETH THAT:
-WHEREAS, …
+[1st-level subdoc, second one]
+SCHEDULE 2 — DEFINITIONS
 
-1. Definitions
-  (a) "Affiliate" means…
-    (i) any direct or indirect owner of more than 10%…
+[2nd-level subdoc — Exhibit B contains Annex I]
+EXHIBIT B — INTERIM PROCEDURES
+1. Procedures
+ANNEX I — WIRE INSTRUCTIONS
+  (a) Bank Details
+    (i) Routing
+      (A) ACH protocol
+        (1) initiation cutoff
 
-2. Voting Rights
-  (a) Each Share shall be entitled to one vote.
-
-[signature block]
-ACME CO.
-By: /s/ Jane Doe
-
-[FIRST subdocument — adds +1 penalty to its descendants]
-EXHIBIT A — FORM OF JOINDER
-THIS JOINDER AGREEMENT is entered into…
-
-WHEREAS, the undersigned wishes to become a party…
-
-1. Joinder
-  (a) The undersigned hereby joins the Shareholders Agreement.
-    (i) Effective on the date of this Joinder.
-
-[NESTED subdocument — adds another +1 penalty]
-SCHEDULE 1 TO EXHIBIT A — TRANSFER TERMS
-
-THIS SCHEDULE OF TRANSFER TERMS sets out…
-
-1. Permitted Transferees
-  (a) An Affiliate of the holder.
-    (i) Any direct subsidiary.
-
-[DOUBLY-NESTED subdocument — third +1 penalty]
-ANNEX I TO SCHEDULE 1 — DEFINITIONS
-
-THIS ANNEX defines the terms used in the Schedule.
-
-1. Listed Terms
-  (a) "Subsidiary" means an entity controlled by the holder.
-    (i) Direct ownership of more than 50% of voting power.
+[3rd-level subdoc — deepest example]
+EXHIBIT C — FORM OF AMENDMENT
+APPENDIX C-1 — TEMPLATE
+SCHEDULE C-1-α — SETTLEMENT MATRIX
+  (a) Tier Calculation
+    (i) Annual Volume
+      (A) Threshold
 ```
 
-## Expected JSONL output (excerpt, levels annotated)
+## Expected depths
 
-```jsonl
-[main contract — no penalty]
-{"level":1, "span":"ACME CO."}
-{"level":0, "span":"SHAREHOLDERS AGREEMENT\nTHIS SHAREHOLDERS AGREEMENT…"}
-{"level":1, "span":"WITNESSETH THAT:\nWHEREAS, …"}
-{"level":2, "span":"1. Definitions"}
-{"level":3, "span":"(a) 'Affiliate' means…"}
-{"level":4, "span":"(i) any direct or indirect owner of more than 10%…"}
-{"level":2, "span":"2. Voting Rights"}
-{"level":3, "span":"(a) Each Share shall be entitled to one vote."}
-{"level":1, "span":"ACME CO.\nBy: /s/ Jane Doe"}
+For the **main agreement** body (no subdoc penalty applied):
 
-[Exhibit A — first subdoc, penalty=1 applies to its descendants]
-{"level":1, "span":"EXHIBIT A — FORM OF JOINDER\nTHIS JOINDER AGREEMENT is entered into…"}
-{"level":2, "span":"WHEREAS, the undersigned wishes to become a party…"}    # was 1, +1
-{"level":3, "span":"1. Joinder"}                                              # was 2, +1
-{"level":4, "span":"(a) The undersigned hereby joins…"}                       # was 3, +1
-{"level":5, "span":"(i) Effective on the date of this Joinder."}              # was 4, +1
+| element                      | depth |
+|------------------------------|-------|
+| "MASTER AGREEMENT" (title)   | 0     |
+| preamble paragraph           | 1     |
+| RECITALS block               | 1     |
+| "1. Term and Termination"    | 1     |
+| "(a) Initial Term…"          | 2     |
+| "2. Definitions"             | 1     |
+| "3. Confidentiality"         | 1     |
 
-[Schedule 1 — nested in Exhibit A, penalty=2]
-{"level":2, "span":"SCHEDULE 1 TO EXHIBIT A — TRANSFER TERMS\nTHIS SCHEDULE…"} # was 1, +1
-{"level":3, "span":"1. Permitted Transferees"}                                 # was 2, +1 (the Schedule's +1 applies to ITS internals, but Schedule itself is at +1 from Exhibit A's penalty)
-                                                                                # i.e., 2 (numbered) + 1 (Exhibit) + 0 (just Schedule's title row, not its descendants) = 3
-                                                                                # WAIT — let me re-read the rule below
-```
+For **EXHIBIT A** (1st-level subdoc; descendants get +1 penalty):
 
-## A precise statement of the penalty rule
+| element                      | base | +penalty = depth |
+|------------------------------|------|------------------|
+| "EXHIBIT A — FORM OF NOTICE" |  1   | 1 (header itself at depth 1; the subdoc HEADER doesn't get its own penalty) |
+| "1. Scope of Notice"         |  1   | 2 (first body clause inside one subdoc) |
+| "(a) Required Recipients"    |  2   | 3                |
+| "(i) by certified mail…"     |  3   | 4                |
+| "(A) addressed to…"          |  4   | 5                |
+| "(1) with delivery…"         |  5   | 6                |
 
-(Easier to state as code than English.)
+For **EXHIBIT B > ANNEX I** (2nd-level subdoc — Annex inside Exhibit;
+descendants get +2):
 
-For each section, the parser computes:
-- `remapped` — the inferred standalone level (0 for the root agreement,
-  1 for the title, 2 for "1.", 3 for "(a)", 4 for "(i)", etc.).
-- `subdoc_penalty` — the count of REAL subdocument ancestors (subdoc-
-  class containers ABOVE this section, EXCLUDING the SEC envelope). It
-  starts at 0 at the document root.
-- `effective_level = remapped + subdoc_penalty`.
+| element                                  | base | +penalty = depth |
+|------------------------------------------|------|------------------|
+| "EXHIBIT B — INTERIM PROCEDURES"         |  1   | 1                |
+| "1. Procedures" (under Exhibit B)        |  1   | 2                |
+| "ANNEX I — WIRE INSTRUCTIONS"            |  1   | 2 (subdoc inside subdoc — header at depth 2) |
+| "(a) Bank Details" (inside Annex)        |  2   | 4                |
+| "(i) Routing"                            |  3   | 5                |
+| "(A) ACH protocol"                       |  4   | 6                |
+| "(1) initiation cutoff"                  |  5   | 7                |
 
-When recursing into a section's children, `child_penalty` is:
-- `subdoc_penalty + 1` if the section is a real subdocument (subdoc
-  class AND not the SEC envelope).
-- `subdoc_penalty` otherwise.
+For **EXHIBIT C > APPENDIX C-1 > SCHEDULE C-1-α** (3rd-level subdoc):
 
-So the SUBDOC HEADER itself sits at `1 + parent_penalty` (because EXHIBIT/
-SCHEDULE/ANNEX patterns map to remapped=1). Its DIRECT descendants get
-`parent_penalty + 1` applied.
+| element                                  | base | +penalty = depth |
+|------------------------------------------|------|------------------|
+| "EXHIBIT C — FORM OF AMENDMENT"          |  1   | 1                |
+| "APPENDIX C-1 — TEMPLATE"                |  1   | 2                |
+| "SCHEDULE C-1-α — SETTLEMENT MATRIX"     |  1   | 3                |
+| "(a) Tier Calculation"                   |  2   | 5                |
+| "(i) Annual Volume"                      |  3   | 6                |
+| "(A) Threshold"                          |  4   | 7                |
 
-## Worked level table for the synthetic example
+## Why this stops at depth 7
 
-| section                                      | standalone level | ancestor subdocs | emitted level |
-|----------------------------------------------|------------------|------------------|---------------|
-| SHAREHOLDERS AGREEMENT (main title)          | 0                | 0                | 0             |
-| ACME CO. (party block)                       | 1                | 0                | 1             |
-| WHEREAS recital                              | 1                | 0                | 1             |
-| "1. Definitions"                             | 2                | 0                | 2             |
-| "(a) 'Affiliate' means…"                     | 3                | 0                | 3             |
-| "(i) any direct or indirect owner…"          | 4                | 0                | 4             |
-| EXHIBIT A — FORM OF JOINDER (subdoc header)  | 1                | 0                | 1             |
-| WHEREAS inside Exhibit A                     | 1                | 1 (Exhibit A)    | 2             |
-| "1. Joinder" inside Exhibit A                | 2                | 1                | 3             |
-| "(a)" inside Exhibit A                       | 3                | 1                | 4             |
-| "(i)" inside Exhibit A                       | 4                | 1                | 5             |
-| SCHEDULE 1 (subdoc header inside Exhibit A)  | 1                | 1 (Exhibit A)    | 2             |
-| "1." inside Schedule 1                       | 2                | 2                | 4             |
-| "(a)" inside Schedule 1                      | 3                | 2                | 5             |
-| "(i)" inside Schedule 1                      | 4                | 2                | 6             |
-| ANNEX I (subdoc header inside Schedule 1)    | 1                | 2                | 3             |
-| "1." inside Annex I                          | 2                | 3                | 5             |
-| "(a)" inside Annex I                         | 3                | 3                | 6             |
-| "(i)" inside Annex I                         | 4                | 3                | 7             |
+The rubric ceiling is 7. The combination "fifth-deepest item inside
+three levels of subdocuments" reaches depth 7 already (5 + 2 = 7 in
+the simplest path, or 4 + 3 = 7 via the deepest subdoc nest). Going
+deeper would require both deeper structural nesting AND deeper subdoc
+nesting at the same time, which we have not seen in the EX-10 corpus.
 
-So levels 5, 6, and 7 only appear when content is nested 1, 2, or 3
-subdocuments deep. The parser supports the full range; whether a
-particular SEC filing actually exercises it depends on the doc.
+`freeze.py` rejects any record with depth > 7 as evidence the parser
+captured noise instead of structure.
 
-## Edge cases
+## Order field
 
-- A subdocument header SECTION whose body is empty AND that has children
-  is still treated as a real subdocument; its descendants get +1.
-- The SEC envelope (FIRST exhibit-class section per idx) does NOT count.
-  Its descendants are "the main agreement" and get penalty=0.
-- A section whose `cls` is something else (`predicted header`,
-  `promoted text leaf`, `introduction`) never adds penalty.
+`order` is global within the idx — it doesn't reset for subdocuments.
+The first emitted span is `order=0` and the counter increments by 1
+for each subsequent span, regardless of which (sub-)subdocument the
+span belongs to. The combination of `order` and `level` lets a
+downstream consumer reconstruct both the linear sequence and the tree
+hierarchy without relying on JSON key ordering.

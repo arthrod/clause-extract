@@ -1036,6 +1036,512 @@ def _merge_bare_section_marker_with_child(rows: list[dict[str, Any]]) -> list[di
     return rows
 
 
+# Marker-pattern recognition for the foreign-content splitter.
+# doc2dict's HTML tree walker can mis-attach trailing sibling content into
+# the previous sibling's body_direct (the classic "tail mis-attribution"
+# pathology — when whitespace-only or invisible-table rows between two
+# sibling sections cause the walker to absorb the next section's content
+# into the previous). This shows up structurally two ways:
+#
+#   1. Mis-parenting: a numbered "N. Title" section ends up as a SIBLING
+#      of lettered "(a)/(b)/.../(z)" subsections under the same parent,
+#      when those lettered subsections belong AS CHILDREN of the numbered
+#      section. Fix: re-parent the lettered/roman/digit-marker siblings
+#      that follow a numbered sibling into that numbered sibling.
+#
+#   2. Body-direct contamination: a section's body_direct contains a
+#      lettered marker (e.g. "(g) ...") whose enumeration doesn't belong
+#      to the section. The marker block (and any orphan prefix paragraph
+#      before it) is foreign and belongs under a different parent — the
+#      sibling section whose existing lettered children's sequence would
+#      naturally continue with this letter. Fix: split the body, promote
+#      the marker block as a new record under the correct parent, and
+#      attach the orphan prefix to the same target parent.
+#
+# Both fixes operate on STRUCTURE (sibling order + child marker
+# enumeration), not on phrase content. No keyword blocklist; no idx
+# branches; no specific-phrase detection.
+
+# A numbered top-level section marker at title start: "13.", "10.\xa0",
+# "Section 13.2", "ARTICLE III". Anchored so partial matches inside body
+# text don't trigger.
+_NUMBERED_SECTION_TITLE_RE = re.compile(
+    r"^\s*(?:"
+    r"\d+\.\s"           # "1. ", "13. "
+    r"|\d+\.\xa0"        # "1.\xa0", "13.\xa0"
+    r"|SECTION\s+\d"     # "SECTION 1", "Section 13.2"
+    r"|ARTICLE\s+(?:\d+|[IVXLCDM]+)"
+    r")",
+    re.IGNORECASE,
+)
+
+# Lettered subsection marker at title start: "(a)", "(b)", ..., "(z)".
+_LETTERED_SUBSECTION_TITLE_RE = re.compile(r"^\s*\(([a-z])\)")
+
+# Roman-numeral subsection marker at title start: "(i)", "(ii)", ...
+_ROMAN_SUBSECTION_TITLE_RE = re.compile(r"^\s*\(([ivx]+)\)", re.IGNORECASE)
+
+# Capital-letter subsection: "(A)", "(B)".
+_CAPLETTER_SUBSECTION_TITLE_RE = re.compile(r"^\s*\(([A-Z])\)")
+
+# Digit-in-parens: "(1)", "(2)".
+_PARENDIGIT_SUBSECTION_TITLE_RE = re.compile(r"^\s*\((\d+)\)")
+
+
+def _extract_letter_marker(title: str) -> str | None:
+    """Return the lowercase letter from a "(a)" / "(b)" / ... title, or None."""
+    if not title:
+        return None
+    m = _LETTERED_SUBSECTION_TITLE_RE.match(title)
+    if m:
+        return m.group(1).lower()
+    return None
+
+
+def _classify_subsection_kind(title: str) -> str | None:
+    """Classify a title as 'numbered', 'lettered', 'roman', 'capletter',
+    'parendigit', or None. Used for sibling-mismatch detection."""
+    if not title:
+        return None
+    s = title.lstrip()
+    if _NUMBERED_SECTION_TITLE_RE.match(s):
+        return "numbered"
+    # Order matters: roman before lettered (since "(i)" matches both).
+    if _ROMAN_SUBSECTION_TITLE_RE.match(s):
+        return "roman"
+    if _LETTERED_SUBSECTION_TITLE_RE.match(s):
+        return "lettered"
+    if _CAPLETTER_SUBSECTION_TITLE_RE.match(s):
+        return "capletter"
+    if _PARENDIGIT_SUBSECTION_TITLE_RE.match(s):
+        return "parendigit"
+    return None
+
+
+def _reparent_lettered_subsections_to_numbered_siblings(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Re-parent lettered/roman subsection records that are wrongly
+    siblings of a numbered top-level section.
+
+    Structural pattern this fixes (doc2dict's HTML-walker pathology):
+        parent_X
+          ├── "11. Security"               (numbered)
+          ├── "12. Enforcement"            (numbered)
+          ├── "(a) The Company..."         (lettered — belongs to 12)
+          ├── "(b) This Agreement..."      (lettered — belongs to 12)
+          ├── "13. Definitions"            (numbered)
+          ├── "(a) Change in Control..."   (lettered — belongs to 13)
+          ├── "(i) any person..."          (roman — belongs to 13(a))
+          ├── ...
+          ├── "(f) Independent Counsel..." (lettered — belongs to 13)
+
+    Each "numbered sibling" claims all subsequent lettered/roman/etc.
+    siblings (until the NEXT numbered sibling or a non-subsection sibling)
+    as its own children. Roman/capletter/parendigit subsections that
+    immediately follow a lettered one continue to be children of that
+    lettered subsection (their original parent is still the parent of the
+    re-parented chain, so we keep the doc2dict depth ordering).
+
+    More precisely: when sweeping the children of a parent in sibling
+    order, once we encounter a "numbered" child N, every later sibling
+    classified as lettered/roman/capletter/parendigit gets re-parented to
+    N's nearest enclosing lettered subsection if any (to preserve roman
+    nesting under a lettered parent), otherwise to N itself. This is a
+    purely structural rule based on marker patterns; it does not look at
+    titles/body text content.
+    """
+    by_node_id = {r["node_id"]: r for r in rows}
+    children_of: dict[int | None, list[dict[str, Any]]] = {}
+    for r in rows:
+        children_of.setdefault(r.get("parent_node_id"), []).append(r)
+
+    # Stable sort children by node_id (doc2dict assigns node_ids in walk
+    # order which matches sibling order under each parent).
+    for pid in children_of:
+        children_of[pid].sort(key=lambda r: r["node_id"])
+
+    # Iterate over every parent and apply the rule.
+    for parent_id, kids in list(children_of.items()):
+        # Skip envelope/trailer kids — they're outside the structural
+        # rule's domain.
+        active_kids = [
+            k for k in kids
+            if not k.get("is_envelope") and k.get("scope") != "trailer"
+        ]
+        if len(active_kids) < 2:
+            continue
+        # Find indices of numbered children in active_kids order.
+        numbered_idxs = [
+            i for i, k in enumerate(active_kids)
+            if _classify_subsection_kind(k.get("title")) == "numbered"
+        ]
+        if not numbered_idxs:
+            continue
+        # For each numbered child N, claim later subsection-marker siblings.
+        # "later" = appears AFTER N in active_kids; "siblings to claim" =
+        # lettered/roman/capletter/parendigit (numbered breaks the chain).
+        # When a roman/capletter/parendigit follows a lettered, it should
+        # be re-parented to that LETTERED (preserving 2-3 depth nesting),
+        # not directly to N.
+        for ni in numbered_idxs:
+            numbered_node = active_kids[ni]
+            current_lettered: dict[str, Any] | None = None
+            for j in range(ni + 1, len(active_kids)):
+                sib = active_kids[j]
+                kind = _classify_subsection_kind(sib.get("title"))
+                if kind == "numbered":
+                    break  # next numbered section starts; stop claiming
+                if kind == "lettered":
+                    # Re-parent to the numbered section.
+                    sib["parent_node_id"] = numbered_node["node_id"]
+                    current_lettered = sib
+                elif kind in {"roman", "capletter", "parendigit"}:
+                    # Re-parent to the most recently seen lettered child
+                    # if any, else to the numbered section directly.
+                    target = current_lettered or numbered_node
+                    sib["parent_node_id"] = target["node_id"]
+                else:
+                    # Non-subsection sibling — leave alone, don't claim.
+                    # (e.g. signature block markers, headings)
+                    pass
+
+    return rows
+
+
+def _split_foreign_lettered_markers_from_body(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Split lettered subsection markers out of a section's body_direct
+    when they don't belong to that section.
+
+    doc2dict's HTML walker can leave foreign content in a body_direct
+    field — typically a continuation paragraph from a sibling section
+    followed by a stray "(g) ..." marker that belongs to a DIFFERENT
+    parent. This shows up as:
+
+        Section S has body_direct =
+            "...continuation paragraph that doesn't start with a marker...
+            (g) "Proceeding" includes ..."
+        where Section S itself uses numbered marker "10.", and a SIBLING
+        of S — Section 13 (Definitions) — has lettered children
+        (a), (b), (c), (d), (e), (f) but is missing (g).
+
+    Structural test for "this marker is foreign":
+      - The marker letter L appears as a lettered subsection marker
+        ("(L) ...") in S's body_direct.
+      - S does NOT itself have a lettered-children sequence that would
+        naturally include L (i.e. S's existing children don't already
+        cover (a)..(L-1)).
+      - There IS a sibling section P (same parent as S, or a recent
+        ancestor sibling) whose existing lettered children DO cover
+        (a)..(L-1) and so naturally extend to (L). P is the rightful
+        owner of the foreign marker block.
+
+    On match:
+      - Strip the foreign block from S's body_direct.
+      - Emit a new lettered-subsection record under P with the marker
+        block as its title+body.
+      - Any orphan prefix paragraph in S's body_direct (text before the
+        foreign marker that doesn't start with its own marker) is also
+        foreign. Emit it as a body-continuation record under P (placed
+        BEFORE the marker block in sibling order so document concat
+        keeps source order).
+
+    All decisions are structural (sibling tree + child marker
+    enumeration). No phrase matching, no keyword blocklist, no idx
+    branches.
+    """
+    by_node_id = {r["node_id"]: r for r in rows}
+    children_of: dict[int | None, list[dict[str, Any]]] = {}
+    for r in rows:
+        children_of.setdefault(r.get("parent_node_id"), []).append(r)
+    for pid in children_of:
+        children_of[pid].sort(key=lambda r: r["node_id"])
+
+    def _has_lettered_child_letter(parent_id: int, letter: str) -> bool:
+        """True if parent_id has an active child whose marker is (letter)."""
+        for c in children_of.get(parent_id, []):
+            if c.get("is_envelope") or c.get("scope") == "trailer":
+                continue
+            cl = _extract_letter_marker(c.get("title") or "")
+            if cl == letter:
+                return True
+        return False
+
+    def _lettered_children_letters(parent_id: int) -> list[str]:
+        """Return the sorted list of single-letter markers among parent's
+        active children (lowercased)."""
+        out: list[str] = []
+        for c in children_of.get(parent_id, []):
+            if c.get("is_envelope") or c.get("scope") == "trailer":
+                continue
+            cl = _extract_letter_marker(c.get("title") or "")
+            if cl:
+                out.append(cl)
+        return sorted(set(out))
+
+    # For each row, scan body_direct for foreign lettered markers.
+    # Foreign-marker detection regex: lettered subsection at a logical
+    # start position (after sentence end, newline, or string start). The
+    # marker MUST be followed by a quote/opening-quote character OR
+    # a capitalised word — to filter out cross-references like
+    # "(d) of this Agreement" or "Section 3(a)(9) of the Exchange Act".
+    _FOREIGN_MARKER_RE = re.compile(
+        r"(?:(?<=\.)\s+|(?<=\?)\s+|(?<=!)\s+|\n\s*|^\s*)"
+        r"(\(([a-z])\)\s*"
+        r"(?:[“”‘’\"\']|[A-Z]))",
+    )
+
+    next_id = max((r["node_id"] for r in rows), default=-1) + 1
+    new_rows: list[dict[str, Any]] = list(rows)
+    appended: list[dict[str, Any]] = []
+
+    for r in list(rows):
+        if r.get("is_envelope") or r.get("scope") == "trailer":
+            continue
+        body = r.get("body_direct") or ""
+        if not body or len(body) < 50:
+            continue
+        # Find lettered-marker matches in body.
+        matches = list(_FOREIGN_MARKER_RE.finditer(body))
+        if not matches:
+            continue
+        # For each match, test "foreign" structurally.
+        first_foreign_offset: int | None = None
+        target_parent_id: int | None = None
+        target_letters_seen: list[str] = []
+        for m in matches:
+            letter = m.group(2).lower()
+            marker_start = m.start(1)
+            # Test 1: does the section R itself have lettered children
+            # whose markers cover (a)..(letter-1)? If yes, this marker
+            # might be R's next child — NOT foreign (rare since doc2dict
+            # would normally promote it; but be safe).
+            r_letters = _lettered_children_letters(r["node_id"])
+            if r_letters and chr(ord(letter) - 1) in r_letters:
+                # The marker continues R's own children — leave it.
+                continue
+            # Test 2: find a sibling section P whose existing lettered
+            # children cover (a)..(letter-1), making this marker P's
+            # natural continuation. P must be a sibling of R (same
+            # parent_node_id) and appear before/around R in document
+            # order. Prefer the NEAREST preceding sibling that fits.
+            r_parent_id = r.get("parent_node_id")
+            cand_targets: list[dict[str, Any]] = []
+            # Look among all sections (any depth) whose own existing
+            # lettered children form an unbroken prefix (a)..(letter-1).
+            for cand in rows:
+                if cand is r:
+                    continue
+                if cand.get("is_envelope") or cand.get("scope") == "trailer":
+                    continue
+                cand_letters = _lettered_children_letters(cand["node_id"])
+                if not cand_letters:
+                    continue
+                # Must include letter-1 and form an unbroken prefix
+                # (a), (b), ..., (letter-1).
+                prev_letter = chr(ord(letter) - 1)
+                if prev_letter not in cand_letters:
+                    continue
+                expected_prefix = [
+                    chr(ord("a") + i) for i in range(ord(prev_letter) - ord("a") + 1)
+                ]
+                if cand_letters == expected_prefix:
+                    cand_targets.append(cand)
+            if not cand_targets:
+                # No structural target — leave the marker in place.
+                continue
+            # Prefer the candidate that's a sibling of R (same parent);
+            # otherwise the candidate appearing latest in document order
+            # before R (closest preceding sibling-like).
+            preferred: dict[str, Any] | None = None
+            for c in cand_targets:
+                if c.get("parent_node_id") == r_parent_id:
+                    preferred = c
+                    break
+            if preferred is None:
+                # Take the candidate with the highest node_id below R.
+                cand_targets.sort(key=lambda c: c["node_id"])
+                for c in cand_targets:
+                    if c["node_id"] < r["node_id"]:
+                        preferred = c
+                if preferred is None:
+                    preferred = cand_targets[-1]
+            # If we already chose a target, ensure it's compatible.
+            if target_parent_id is not None and preferred["node_id"] != target_parent_id:
+                # Different target on this match — keep first target and
+                # stop processing further markers for this record.
+                break
+            target_parent_id = preferred["node_id"]
+            target_letters_seen.append(letter)
+            if first_foreign_offset is None:
+                first_foreign_offset = marker_start
+
+        if target_parent_id is None or first_foreign_offset is None:
+            continue
+
+        # Now split the body. The text before first_foreign_offset is
+        # an orphan-continuation paragraph that doesn't start with its
+        # own marker. Structurally it cannot be R's content because R is
+        # a numbered section whose own body would have its own marker if
+        # any substantive lettered content existed. So the prefix is
+        # ALSO foreign — it's the wrap-up of the foreign block's lettered
+        # sibling that came BEFORE the marker we matched. Move it to
+        # target_parent as a continuation record.
+        #
+        # Exception: if the prefix has its own subsection markers
+        # ("(a)/N./..."), then it's a legitimate part of R's body that
+        # _split_inline_section_markers should have split. We keep that
+        # in R to be safe — but for the simple "no own marker" case
+        # (which is the common doc2dict tail-attribution pathology) we
+        # move it.
+        prefix_text = body[:first_foreign_offset].rstrip()
+        foreign_body = body[first_foreign_offset:].strip()
+
+        # Structural check on the prefix: does it contain its own
+        # subsection marker at a logical start position? If yes, it's
+        # R's legitimate body and we keep it.
+        prefix_has_own_marker = bool(_FOREIGN_MARKER_RE.search(prefix_text)) or bool(
+            re.search(
+                r"(?:(?<=[.\s\xa0])|^)\d+\.\s*[A-Z]",
+                prefix_text,
+            )
+        )
+
+        if prefix_has_own_marker:
+            kept_body = prefix_text
+            orphan_text = ""
+        else:
+            # All of the prefix is foreign — it's a continuation paragraph
+            # belonging to the same target_parent as the marker block.
+            kept_body = ""
+            orphan_text = prefix_text
+
+        # Update R's body to the kept portion (empty when the prefix is
+        # foreign). R will have only its title.
+        r["body_direct"] = kept_body
+        r["body_direct_chars"] = len(kept_body)
+
+        # Determine the depth for the new lettered records: target's
+        # depth + 1.
+        target_row = by_node_id[target_parent_id]
+        target_depth = target_row.get("depth", 0)
+        target_penalty = target_row.get("subdoc_penalty", 0)
+        # Lettered subsections sit at target_depth + 1.
+        new_letter_depth = target_depth + 1
+
+        # The orphan-prefix paragraph attaches NOT to target_parent
+        # itself but to one of target_parent's lettered children — the
+        # one the orphan is the wrap-up of. Structural identifier: the
+        # first lettered child of target_parent that has sub-children
+        # (roman/capletter/parendigit). The orphan logically appears
+        # AFTER those sub-children in source order and is a body
+        # continuation of that lettered child.
+        #
+        # Rationale: when a lettered subsection L has deep sub-items
+        # (e.g. roman (i)-(v) under "(a) Change in Control means ..."),
+        # the typical doc structure is L's body = sub-items + wrap-up
+        # paragraph. doc2dict's HTML walker can detach that wrap-up
+        # paragraph and bury it in a sibling section's body_direct.
+        # Attaching the orphan back under L (depth = L.depth + 1)
+        # restores the original semantic.
+        #
+        # If no lettered child of target_parent has sub-children, fall
+        # back to attaching the orphan under target_parent at the
+        # lettered-sibling depth.
+        orphan_parent_id = target_parent_id
+        orphan_depth = new_letter_depth
+        if orphan_text:
+            for tc in children_of.get(target_parent_id, []):
+                if tc.get("is_envelope") or tc.get("scope") == "trailer":
+                    continue
+                if _extract_letter_marker(tc.get("title") or "") is None:
+                    continue
+                # Count sub-children of this lettered child.
+                grand = children_of.get(tc["node_id"], [])
+                deep_kids = [
+                    g for g in grand
+                    if not g.get("is_envelope") and g.get("scope") != "trailer"
+                    and _classify_subsection_kind(g.get("title")) in {
+                        "roman", "capletter", "parendigit"
+                    }
+                ]
+                if deep_kids:
+                    orphan_parent_id = tc["node_id"]
+                    orphan_depth = tc.get("depth", new_letter_depth) + 1
+                    break
+
+        # Re-scan foreign_body, this time relative to its own start, to
+        # build records. Use the same _FOREIGN_MARKER_RE.
+        foreign_matches = list(_FOREIGN_MARKER_RE.finditer(foreign_body))
+
+        if orphan_text:
+            # Emit as a body-continuation record. Its title is empty so
+            # the JSONL span is just the body text. Position-sort will
+            # place it correctly in document order.
+            appended.append({
+                "node_id": next_id,
+                "parent_node_id": orphan_parent_id,
+                "depth": orphan_depth,
+                "doc2dict_section_key": f"_foreign_cont_{next_id}",
+                "cls": "promoted text leaf",
+                "title": "",
+                "standardized_title": None,
+                "n_direct_section_children": 0,
+                "body_direct_chars": len(orphan_text),
+                "body_recursive_chars": len(orphan_text),
+                "body_direct": orphan_text,
+                "body_recursive": orphan_text,
+                "subdoc_penalty": target_penalty,
+                "is_envelope": False,
+                "scope": "agreement",
+            })
+            next_id += 1
+
+        # Emit each foreign-marker block as a new record.
+        for i, m in enumerate(foreign_matches):
+            mk_start = m.start(1)
+            mk_end = foreign_matches[i + 1].start(1) if i + 1 < len(foreign_matches) else len(foreign_body)
+            chunk = foreign_body[mk_start:mk_end].strip()
+            if not chunk:
+                continue
+            # Split heading from body: heading = "(L) Title text." up to first
+            # period+space, or first ~80 chars.
+            mh = re.match(
+                r"^(\([a-z]\)\s*[^.\n]{0,160}?)(?:\.\s|\.\xa0|\.$|\.\n)",
+                chunk,
+            )
+            if mh:
+                heading = mh.group(1).strip()
+                body_text = chunk[mh.end():].strip()
+            else:
+                lines = chunk.split("\n", 1)
+                heading = lines[0].strip()[:160]
+                body_text = lines[1].strip() if len(lines) > 1 else chunk[len(heading):].strip()
+            appended.append({
+                "node_id": next_id,
+                "parent_node_id": target_parent_id,
+                "depth": new_letter_depth,
+                "doc2dict_section_key": f"_foreign_marker_{next_id}",
+                "cls": "promoted text leaf",
+                "title": heading,
+                "standardized_title": None,
+                "n_direct_section_children": 0,
+                "body_direct_chars": len(body_text),
+                "body_recursive_chars": len(chunk),
+                "body_direct": body_text,
+                "body_recursive": chunk,
+                "subdoc_penalty": target_penalty,
+                "is_envelope": False,
+                "scope": "agreement",
+            })
+            next_id += 1
+
+    new_rows.extend(appended)
+    return new_rows
+
+
 def _sort_records_by_source_position(
     rows: list[dict[str, Any]], idx: int
 ) -> list[dict[str, Any]]:
@@ -1374,8 +1880,20 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
     sections = _fix_post_signature_envelope(sections)
     sections = _apply_scope_rule(sections)
     sections = _merge_bare_section_marker_with_child(sections)
+    # After the merge step, fix doc2dict's HTML-walker mis-parenting:
+    # numbered "13. Definitions" sometimes lands as a SIBLING of its own
+    # lettered (a)-(f) children. Re-parent lettered/roman subsections that
+    # follow a numbered sibling into that numbered section so the tree
+    # depths reflect the actual legal hierarchy.
+    sections = _reparent_lettered_subsections_to_numbered_siblings(sections)
     sections = _split_l0_title_from_preamble(sections)
     sections = _split_inline_section_markers(sections)
+    # After splitting out inlined "N." sections from body_direct, scan
+    # for foreign lettered "(L)" markers that doc2dict's tail-attribution
+    # pathology left in the body. Split them out and re-attach to the
+    # sibling section whose lettered children's enumeration would
+    # naturally continue with that letter.
+    sections = _split_foreign_lettered_markers_from_body(sections)
     sections = _sort_records_by_source_position(sections, idx)
 
     base["parse_status"] = "ok"

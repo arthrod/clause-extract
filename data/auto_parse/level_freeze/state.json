@@ -1,11 +1,19 @@
 {
   "current_idx": 0,
-  "frozen": [],
+  "frozen": [
+    0
+  ],
   "history": [
     {
       "ts": "2026-05-11T22:27:59",
       "action": "reset",
       "note": "Full reset before redo/infra: rubric reshape (L0=title alone, L1=preamble+recitals+top body clauses+sig), order field added to JSONL schema, 95% reconstruction gate live. Previous 73 baselines stashed at ~/Library/clause-extract-backups/before-redo-20260511T222200/."
+    },
+    {
+      "ts": "2026-05-15T23:37:26",
+      "action": "freeze",
+      "idx": 0,
+      "n_records": 74
     }
   ]
 }

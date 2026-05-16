@@ -123,21 +123,25 @@ _TAG_STRIP = re.compile(r"<[^>]+>")
 
 # Ordered most-specific first so roman "(i)" is checked before lettered "(i)".
 _LEVEL_PATTERNS: list[tuple[int, re.Pattern[str]]] = [
-    # Level 4: roman numeral in parens — multi-char "(ii)", "(iii)" or
+    # New rubric: numbered sections "1." sit at depth 1 (top-level body
+    # clauses are direct children of the agreement). Lettered subsections
+    # "(a)" at 2; roman/cap-letter/digit items "(i)"/"(A)"/"(1)" at 3.
+    #
+    # Depth 3: roman numeral in parens — multi-char "(ii)", "(iii)" or
     # common single roman numerals "(i)", "(I)", "(v)", "(V)", "(x)", "(X)".
-    (4, re.compile(r"^\(([ivx]+|[IVX]+)\)")),
-    # Level 4: uppercase letter in parens "(A)", "(B)"
-    (4, re.compile(r"^\(([A-Z])\)")),
-    # Level 4: digit in parens "(1)", "(2)"
-    (4, re.compile(r"^\((\d+)\)")),
-    # Level 3: single lowercase letter in parens "(a)", "(b)", "(c)"
-    (3, re.compile(r"^\(([a-z])\)")),
-    # Level 2: bare number with period ("1.", "10.", "21.")
-    (2, re.compile(r"^(\d+)\.")),
-    # Level 2: ARTICLE heading ("ARTICLE I", "ARTICLE 3", "Article IV.")
-    (2, re.compile(r"^ARTICLE\s+(\d+|[IVXLCDM]+)\.?\s*$", re.IGNORECASE)),
-    # Level 2: SECTION heading ("SECTION 1.", "Section 2.3")
-    (2, re.compile(r"^SECTION\s+\d+", re.IGNORECASE)),
+    (3, re.compile(r"^\(([ivx]+|[IVX]+)\)")),
+    # Depth 3: uppercase letter in parens "(A)", "(B)"
+    (3, re.compile(r"^\(([A-Z])\)")),
+    # Depth 3: digit in parens "(1)", "(2)"
+    (3, re.compile(r"^\((\d+)\)")),
+    # Depth 2: single lowercase letter in parens "(a)", "(b)", "(c)"
+    (2, re.compile(r"^\(([a-z])\)")),
+    # Depth 1: bare number with period ("1.", "10.", "21.")
+    (1, re.compile(r"^(\d+)\.")),
+    # Depth 1: ARTICLE heading ("ARTICLE I", "ARTICLE 3", "Article IV.")
+    (1, re.compile(r"^ARTICLE\s+(\d+|[IVXLCDM]+)\.?\s*$", re.IGNORECASE)),
+    # Depth 1: SECTION heading ("SECTION 1.", "Section 2.3")
+    (1, re.compile(r"^SECTION\s+\d+", re.IGNORECASE)),
 ]
 
 
@@ -216,20 +220,62 @@ def _is_text_leaf(d: Any) -> bool:
     return isinstance(d, dict) and "text" in d and "contents" not in d
 
 
+def _is_table_node(d: Any) -> bool:
+    """A doc2dict node representing an HTML <table>.
+
+    doc2dict stores tables as `{"table": {"preamble": ..., "data": ...,
+    "postamble": ..., "title": ..., "cleaned": ...}}` with NO `title`,
+    `class`, `contents` or `text` keys. These nodes are neither section
+    nodes nor text leaves and were previously skipped — but their
+    `preamble`/`postamble` carry real document text (often multiple
+    inline sections worth) that must be captured.
+    """
+    return (
+        isinstance(d, dict)
+        and "table" in d
+        and "text" not in d
+        and "contents" not in d
+        and "title" not in d
+    )
+
+
 def _collect_table_text(node: dict[str, Any]) -> str:
-    """Extract combined preamble + postamble text from a node's ``table`` key."""
+    """Extract preamble + cell data + postamble text from a table node.
+
+    Excludes the table's `title` field because doc2dict copies the
+    enclosing section's title text into it — keeping that would double-
+    count content already emitted on the parent section.
+    """
     table = node.get("table")
     if not isinstance(table, dict):
         return ""
     parts: list[str] = []
-    for key in ("preamble", "postamble"):
-        t = table.get(key)
-        if isinstance(t, str) and t.strip():
-            parts.append(t.strip())
+    pre = table.get("preamble")
+    if isinstance(pre, str) and pre.strip():
+        parts.append(pre.strip())
+    data = table.get("data")
+    if isinstance(data, list):
+        for row in data:
+            if isinstance(row, list):
+                for cell in row:
+                    if isinstance(cell, str) and cell.strip():
+                        parts.append(cell.strip())
+            elif isinstance(row, str) and row.strip():
+                parts.append(row.strip())
+    post = table.get("postamble")
+    if isinstance(post, str) and post.strip():
+        parts.append(post.strip())
     return "\n".join(parts)
 
 
 def _collect_direct_text(section: dict[str, Any]) -> str:
+    """Concat text-leaf children. Excludes text leaves that will be promoted
+    into their own section records (so they don't double-emit). A leaf is
+    promotable when its text begins with a section marker like "1.", "(a)",
+    "(i)". See `_promote_text_leaves`.
+
+    Also walks table-only children (doc2dict's HTML-table representation)
+    and pulls their preamble/data/postamble text into the parent's body."""
     out: list[str] = []
     contents = section.get("contents")
     if isinstance(contents, dict):
@@ -237,6 +283,14 @@ def _collect_direct_text(section: dict[str, Any]) -> str:
             if _is_text_leaf(child):
                 t = child.get("text")
                 if isinstance(t, str):
+                    if _TEXT_LEAF_SECTION_RE.match(t):
+                        # Text leaf will be promoted to its own record.
+                        # Exclude here to avoid duplicate emission.
+                        continue
+                    out.append(t)
+            elif _is_table_node(child):
+                t = _collect_table_text(child)
+                if t:
                     out.append(t)
     return "\n".join(out)
 
@@ -918,6 +972,368 @@ def _fix_post_signature_envelope(rows: list[dict[str, Any]]) -> list[dict[str, A
     return rows
 
 
+def _merge_bare_section_marker_with_child(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge a bare "N." marker record with its descriptive child.
+
+    doc2dict sometimes splits a numbered section into:
+      - parent: title="10.", empty body
+      - child: title="Retroactive Effect; …", body="All agreements…"
+    where the child carries the actual section description and body.
+    Per the rubric, this is ONE clause at depth 1: "10. Retroactive
+    Effect…". Merging keeps the JSONL clean (no orphan marker records).
+
+    Match criteria:
+      - parent.title matches `^\\d+\\.\\s*$`
+      - parent.body_direct is empty
+      - parent has exactly one direct child (in `rows`, i.e. node-id-
+        parented; not a doc2dict text leaf)
+      - child.title is non-empty and does not start with a digit marker
+
+    On match:
+      - parent.title becomes `parent.title + ' ' + child.title`
+      - parent.body_direct becomes child.body_direct
+      - child is marked `is_envelope=True` so it drops from JSONL
+        (parquet still records both for audit)
+      - child's descendants are re-parented to the merged record
+    """
+    by_node_id = {r["node_id"]: r for r in rows}
+    children_of: dict[int | None, list[dict[str, Any]]] = {}
+    for r in rows:
+        children_of.setdefault(r.get("parent_node_id"), []).append(r)
+
+    _BARE_MARKER_RE = re.compile(r"^\s*\d+\.\s*$")
+    _HAS_MARKER_PREFIX_RE = re.compile(r"^\s*\d+\.")
+
+    for r in rows:
+        if r.get("is_envelope") or r.get("scope") == "trailer":
+            continue
+        title = (r.get("title") or "").strip()
+        body = (r.get("body_direct") or "").strip()
+        if not title or body:
+            continue
+        if not _BARE_MARKER_RE.match(title):
+            continue
+        kids = [
+            c for c in children_of.get(r["node_id"], [])
+            if not c.get("is_envelope") and c.get("scope") != "trailer"
+        ]
+        if len(kids) != 1:
+            continue
+        kid = kids[0]
+        kid_title = (kid.get("title") or "").strip()
+        if not kid_title or _HAS_MARKER_PREFIX_RE.match(kid_title):
+            continue
+        # Merge: combine titles, take kid's body, mark kid as envelope.
+        r["title"] = f"{title} {kid_title}"
+        r["body_direct"] = kid.get("body_direct") or ""
+        r["body_direct_chars"] = len(r["body_direct"])
+        kid["is_envelope"] = True
+        # Re-parent kid's children to merged record so their lineage
+        # stays correct in the parquet view.
+        for grand in children_of.get(kid["node_id"], []):
+            grand["parent_node_id"] = r["node_id"]
+
+    return rows
+
+
+def _sort_records_by_source_position(
+    rows: list[dict[str, Any]], idx: int
+) -> list[dict[str, Any]]:
+    """Stable-sort in-scope records by their first-occurrence position in
+    the source text, with a forward-progress search bias.
+
+    Why this exists: doc2dict's tree walk is not always document order.
+    For example, in the ULURU indemnification agreement (idx=0), Section 9
+    sits under a separate "(d)" predicted-header subtree that follows the
+    "10." subtree in the tree — but in the source, Section 9 obviously
+    comes before Section 10. Same kind of issue with the table-split
+    sections 14-21 (which we inject post-walk).
+
+    Forward-progress search: when locating each record in the source, we
+    start the search at the previous record's offset (minus a small
+    backtrack window). That prevents repeated short tokens like
+    "INDEMNITEE" from matching the FIRST occurrence in the preamble
+    every time — they'll match the next occurrence after the previous
+    record's position, which is the actual signature-block label.
+
+    Records whose probe is not found get the previous record's offset
+    so they stay glued to their preceding neighbour.
+
+    Note: this is a STRUCTURAL fix — it uses doc-position evidence from
+    the canonical bs4 extraction (`scripts/parse_source_of_truth.py`),
+    not phrase matching against keywords.
+    """
+    sot_text = _SOT_LOOKUP.get(idx)
+    if sot_text is None:
+        sot_text = _load_sot_span_clean(idx)
+        _SOT_LOOKUP[idx] = sot_text
+    if not sot_text:
+        return rows
+
+    # Normalize source: lowercase, collapse all whitespace+nbsp to single
+    # space. Record the new->old index map so a found "norm offset" can
+    # be turned back into a position in the original string (we don't
+    # actually need this for sorting; we sort by norm offset directly).
+    sot_norm = re.sub(r"[\s\xa0]+", " ", sot_text.lower())
+
+    def _normalize_probe(s: str) -> str:
+        return re.sub(r"[\s\xa0]+", " ", s.lower()).strip()
+
+    def _probe_candidates(rec: dict[str, Any]) -> list[str]:
+        """Build progressively-shorter probes for the record."""
+        title = (rec.get("title") or "").strip()
+        body = (rec.get("body_direct") or "").strip()
+        candidates: list[str] = []
+        # Most specific: title + body head.
+        if title and body:
+            candidates.append(_normalize_probe(f"{title} {body[:80]}"))
+        # Just the title and a body snippet.
+        if title:
+            candidates.append(_normalize_probe(title)[:60])
+        # Just a body snippet.
+        if body:
+            candidates.append(_normalize_probe(body)[:60])
+        # Filter out empties and dupes preserving order.
+        seen: set[str] = set()
+        out: list[str] = []
+        for c in candidates:
+            if c and len(c) >= 4 and c not in seen:
+                seen.add(c)
+                out.append(c)
+        return out
+
+    # Backtrack window: how far before the previous offset we allow the
+    # search to look. Small (~200 chars) so a brand-new occurrence wins
+    # over a re-find of an older string.
+    _BACKTRACK = 200
+
+    prev_offset = 0
+    indexed: list[tuple[int, int, dict[str, Any]]] = []
+    for orig_idx, r in enumerate(rows):
+        if r.get("is_envelope") or r.get("scope") == "trailer":
+            # Keep these out of the sort entirely (they're dropped from
+            # JSONL anyway). Park at -1 to stay at the front.
+            indexed.append((-1, orig_idx, r))
+            continue
+        probes = _probe_candidates(r)
+        best = -1
+        search_from = max(0, prev_offset - _BACKTRACK)
+        for probe in probes:
+            pos = sot_norm.find(probe, search_from)
+            if pos < 0:
+                # Fall back to global search if not found forward.
+                pos = sot_norm.find(probe)
+            if pos >= 0:
+                best = pos
+                break
+        if best < 0:
+            # Could not locate this record at all. Stick with previous.
+            best = prev_offset
+        else:
+            prev_offset = best
+        indexed.append((best, orig_idx, r))
+
+    indexed.sort(key=lambda t: (t[0], t[1]))
+    return [t[2] for t in indexed]
+
+
+_SOT_LOOKUP: dict[int, str] = {}
+_SOT_FILE = Path(__file__).resolve().parent.parent / "data" / "auto_parse" / "parse_source_of_truth.jsonl"
+
+
+def _load_sot_span_clean(idx: int) -> str | None:
+    """Read `span_clean` for the requested idx from the source-of-truth
+    file. Returns None if file/row missing."""
+    if not _SOT_FILE.exists():
+        return None
+    try:
+        for line in _SOT_FILE.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("idx") == idx:
+                return rec.get("span_clean") or ""
+    except OSError:
+        return None
+    return None
+
+
+def _split_l0_title_from_preamble(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Split the L0 (agreement title) record from its preamble body.
+
+    Per task_rules/level_rubric.md: depth 0 is the agreement title alone,
+    a single record per idx with no body. The preamble paragraph
+    ("THIS INDEMNIFICATION AGREEMENT (the 'Agreement') is made…") is a
+    direct child of the agreement and belongs at depth 1.
+
+    doc2dict combines the title and the immediately-following preamble
+    text-leaf into one section with body_direct = preamble. This
+    post-processor:
+      - Finds the L0 record (depth=0, not envelope, scope=agreement)
+      - If it has non-empty body_direct, creates a new L1 record with
+        that body content (as a child of the L0)
+      - Clears body_direct on the L0 record so its emitted span is the
+        title alone
+    """
+    by_node_id = {r["node_id"]: r for r in rows}
+
+    l0: dict[str, Any] | None = None
+    for r in rows:
+        if (
+            r.get("depth") == 0
+            and not r.get("is_envelope")
+            and r.get("scope") == "agreement"
+        ):
+            l0 = r
+            break
+    if l0 is None:
+        return rows
+
+    body = (l0.get("body_direct") or "").strip()
+    if not body:
+        return rows
+
+    next_id = max((r["node_id"] for r in rows), default=-1) + 1
+    preamble_row: dict[str, Any] = {
+        "node_id": next_id,
+        "parent_node_id": l0["node_id"],
+        "depth": 1 + (l0.get("subdoc_penalty") or 0),
+        "doc2dict_section_key": f"_l0_preamble_{next_id}",
+        "cls": "promoted text leaf",
+        "title": "",
+        "standardized_title": None,
+        "n_direct_section_children": 0,
+        "body_direct_chars": len(body),
+        "body_recursive_chars": len(body),
+        "body_direct": body,
+        "body_recursive": body,
+        "subdoc_penalty": l0.get("subdoc_penalty") or 0,
+        "is_envelope": False,
+        "scope": "agreement",
+    }
+
+    # Clear the L0's body so its emitted span is title-only.
+    l0["body_direct"] = ""
+    l0["body_direct_chars"] = 0
+
+    # Insert preamble row directly after L0 in document order so its
+    # span is emitted after the title and before any later siblings.
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        out.append(r)
+        if r["node_id"] == l0["node_id"]:
+            out.append(preamble_row)
+    return out
+
+
+def _split_inline_section_markers(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Split records whose body_direct contains inline section markers.
+
+    doc2dict sometimes packs multiple top-level sections into a single
+    table-preamble/postamble string. Example: section 10's body field
+    contains the verbatim text "…rights under this Agreement. 14.
+    Severability.  The invalidity… 15. Modification and Waiver. … 21.
+    Governing Law… ". Without splitting, sections 14-21 appear inside
+    section 10's span — not as their own L1 records.
+
+    This post-processor:
+      1. Finds records whose body_direct has 2+ inline "N." markers
+         (where N is a number, indicating a numbered section start).
+      2. Splits the body at each marker.
+      3. Keeps the leading chunk (before the first marker) on the
+         original record.
+      4. Emits each subsequent chunk as its own promoted record at the
+         same depth as the original (or at depth=1 if the original was
+         deeper — top-level sections always sit at depth 1).
+    """
+    next_id = max((r["node_id"] for r in rows), default=-1) + 1
+
+    new_rows: list[dict[str, Any]] = []
+    for r in rows:
+        new_rows.append(r)
+        if r.get("is_envelope") or r.get("scope") == "trailer":
+            continue
+        body = r.get("body_direct") or ""
+        if not body or len(body) < 200:
+            continue
+        # Look for 2+ inline section markers like "\n14. " or " 14. " or
+        # ". 14." — these indicate top-level numbered sections embedded
+        # in the body text.
+        # Use a stricter regex: number followed by period, whitespace, capital letter.
+        markers = list(re.finditer(
+            r"(?:(?<=[.\s\xa0])|^)(\d+)\.\s*[A-Z]",
+            body,
+        ))
+        if len(markers) < 2:
+            continue
+
+        # Build segments: leading-text + (marker, segment) pairs.
+        segments: list[tuple[int, int, int]] = []  # (start, end, marker_num)
+        for i, m in enumerate(markers):
+            seg_start = m.start()
+            seg_end = markers[i + 1].start() if i + 1 < len(markers) else len(body)
+            num = int(m.group(1))
+            segments.append((seg_start, seg_end, num))
+
+        # Validate marker numbering is monotonic (1,2,3 or 14,15,16,...)
+        nums = [s[2] for s in segments]
+        if not all(nums[i + 1] - nums[i] == 1 for i in range(len(nums) - 1)):
+            continue
+
+        first_start = segments[0][0]
+        leading = body[:first_start].rstrip()
+        # Update original record's body
+        r["body_direct"] = leading
+        r["body_direct_chars"] = len(leading)
+
+        # Determine depth for new records: L1 (top-level body clause)
+        # plus the original's subdoc_penalty.
+        subdoc_penalty = r.get("subdoc_penalty") or 0
+        new_depth = 1 + subdoc_penalty
+
+        for seg_start, seg_end, num in segments:
+            seg_text = body[seg_start:seg_end].strip()
+            if not seg_text:
+                continue
+            # Split heading from body: heading = "N. Title."
+            m_head = re.match(
+                r"^(\d+\.\s*[^.\n]*?)(?:\.\s|\.\xa0|\.$)",
+                seg_text,
+            )
+            if m_head:
+                heading = m_head.group(1).strip()
+                body_text = seg_text[m_head.end():].strip()
+            else:
+                # Fall back: first line is heading
+                lines = seg_text.split("\n", 1)
+                heading = lines[0].strip()[:120]
+                body_text = lines[1].strip() if len(lines) > 1 else seg_text[len(heading):].strip()
+
+            new_rows.append({
+                "node_id": next_id,
+                "parent_node_id": r.get("parent_node_id"),
+                "depth": new_depth,
+                "doc2dict_section_key": f"_inline_{next_id}",
+                "cls": "promoted text leaf",
+                "title": heading,
+                "standardized_title": None,
+                "n_direct_section_children": 0,
+                "body_direct_chars": len(body_text),
+                "body_recursive_chars": len(seg_text),
+                "body_direct": body_text,
+                "body_recursive": seg_text,
+                "subdoc_penalty": subdoc_penalty,
+                "is_envelope": False,
+                "scope": "agreement",
+            })
+            next_id += 1
+
+    return new_rows
+
+
 def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     size_kb = round(len(raw) / 1024, 2)
     base: dict[str, Any] = {
@@ -957,6 +1373,10 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
     sections = walk_sections(document_tree, depth=0)
     sections = _fix_post_signature_envelope(sections)
     sections = _apply_scope_rule(sections)
+    sections = _merge_bare_section_marker_with_child(sections)
+    sections = _split_l0_title_from_preamble(sections)
+    sections = _split_inline_section_markers(sections)
+    sections = _sort_records_by_source_position(sections, idx)
 
     base["parse_status"] = "ok"
     base["n_section_nodes"] = len(sections)

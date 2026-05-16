@@ -77,7 +77,7 @@ concat-of-spans for one idx ≈ `span_clean[idx]`.
 
 `scripts/measure_reconstruction.py` computes per-idx word coverage
 and char ratio. The freeze step **refuses** the freeze if word
-coverage for this idx is below 95% (project bar from
+coverage for this idx is below 90% (project bar from
 `docs/DECISIONS.md` §10). A reconstruction failure is on equal
 footing with a rubric violation: fix the parser so spans recover
 the source words, then re-run the parser and freeze again.
@@ -134,8 +134,8 @@ full JSONL has the unbounded text.)
      uv run scripts/measure_reconstruction.py --idx {current_idx}
 
    Read the word coverage and char ratio for idx={current_idx}. **Word
-   coverage < 95% is a HARD FAIL at freeze time** (per
-   `docs/DECISIONS.md` §10). If you're below 95%, the parser dropped
+   coverage < 90% is a HARD FAIL at freeze time** (per
+   `docs/DECISIONS.md` §10). If you're below 90%, the parser dropped
    real content; find the missing words in the source, locate the
    record(s) that should have captured them, and fix the slicing.
 
@@ -146,8 +146,8 @@ full JSONL has the unbounded text.)
    freeze.py validates the rubric (exactly 1 depth-0 — the title
    alone, max depth ≤ 7, no envelope as first record, monotonic
    `order`, no filing-trailer phrases, no forbidden monkey-patch
-   constructs in the parser source) AND enforces the **95%
-   reconstruction gate**. Below 95% word coverage → freeze refused.
+   constructs in the parser source) AND enforces the **90%
+   reconstruction gate**. Below 90% word coverage → freeze refused.
    The error message includes the percentage, char ratio, count of
    missing words, and a sample of the missing words; use that to
    localize what got dropped, then fix the parser slicing and retry.

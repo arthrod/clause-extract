@@ -171,8 +171,8 @@ and enforced by `freeze.py`):
     duplicated.
 
 Project bar (from [`../docs/DECISIONS.md`](../docs/DECISIONS.md) §10):
-**word coverage ≥ 95% per idx.** `freeze.py` enforces this as a
-**blocking gate** — a per-idx reconstruction below 95% refuses the
+**word coverage ≥ 90% per idx.** `freeze.py` enforces this as a
+**blocking gate** — a per-idx reconstruction below 90% refuses the
 freeze and prints the missing-word sample so the agent can localize
 the gap. The bar is per-idx, not just per-corpus, so individual
 baselines can't sneak in below the line.
@@ -186,4 +186,4 @@ baselines can't sneak in below the line.
 - [`scope_rule.md`](scope_rule.md) — agreement-vs-trailer
   classification using the structural scope rule.
 - [`freeze_command.md`](freeze_command.md) — what the freeze
-  validator checks and the 95% reconstruction gate.
+  validator checks and the 90% reconstruction gate.

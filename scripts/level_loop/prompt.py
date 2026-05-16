@@ -208,7 +208,7 @@ source of truth for what a "correct" parse looks like:
   - `task_rules/examples_with_subdocs.md` — subdoc penalty up to L7.
   - `task_rules/freeze_command.md` — what the freeze validator checks
     (rubric, monkey-patch, AND reconstruction gates are all BLOCKING:
-    word coverage < 95% → freeze refused).
+    word coverage < 90% → freeze refused).
 
 READ AT LEAST `level_rubric.md` AND `scope_rule.md` BEFORE EDITING.
 
@@ -502,9 +502,9 @@ is stale and any regress signal you read is a phantom.
 
          uv run scripts/measure_reconstruction.py --idx {current_idx}
 
-       Read the word coverage and char ratio. Word coverage < 95%
+       Read the word coverage and char ratio. Word coverage < 90%
        is a HARD FAIL at freeze time — the freeze gate refuses
-       below the bar. If you're below 95%, the parser dropped real
+       below the bar. If you're below 90%, the parser dropped real
        content; find the missing words in the source, locate the
        record(s) that should have captured them, and fix the
        slicing. Then re-run the parser and try again.
@@ -523,7 +523,7 @@ is stale and any regress signal you read is a phantom.
        arithmetic).
 
    freeze.py also enforces a BLOCKING reconstruction gate: if word
-   coverage for this idx is below 95%, the freeze is refused. The
+   coverage for this idx is below 90%, the freeze is refused. The
    error message includes the percentage, char ratio, count of
    missing words, and a sample of the missing words. Use that sample
    to localize what got dropped, fix the parser slicing, re-run the

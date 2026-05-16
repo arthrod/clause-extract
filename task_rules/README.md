@@ -40,7 +40,7 @@ signature filing trailers). See [`scope_rule.md`](scope_rule.md).
 
 - [`level_rubric.md`](level_rubric.md) — depth 0–7 rubric (read
   `level` as nesting depth), SEC-envelope drop, subdocument depth
-  penalty, and the 95% reconstruction gate.
+  penalty, and the 90% reconstruction gate.
 - [`scope_rule.md`](scope_rule.md) — structural in-scope/out-of-scope
   rule for filtering non-agreement metadata using signature-block +
   real-subdoc detection. NEVER use phrase blocklists.

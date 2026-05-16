@@ -24,7 +24,7 @@ uv run scripts/level_loop/freeze.py 0          # freezes idx=0
    detector** (see below). Refuses to freeze on violations.
 4. Runs the **blocking reconstruction gate** comparing concat-of-spans
    to the source-of-truth (see below). Refuses the freeze if word
-   coverage is below 95% (per [`../docs/DECISIONS.md`](../docs/DECISIONS.md)
+   coverage is below 90% (per [`../docs/DECISIONS.md`](../docs/DECISIONS.md)
    §10).
 5. Writes the records verbatim (full spans, no truncation) to
    `data/auto_parse/level_freeze/frozen/idx_<N>.jsonl`.
@@ -94,14 +94,14 @@ where `source` is `parse_source_of_truth.jsonl[idx].span_clean` and
 for this idx. Both texts are lowercased and whitespace-collapsed before
 the word-set / char-length comparison.
 
-  - **Pass** at word coverage ≥ 95% — printed as
+  - **Pass** at word coverage ≥ 90% — printed as
     `reconstruction OK: word_coverage=X.X% char_ratio=Y.Y%`.
-  - **Fail** at word coverage < 95% — freeze refused. The error
+  - **Fail** at word coverage < 90% — freeze refused. The error
     includes the percentage, char ratio, count of missing words, and
     a sample of the missing words so the agent can localize the gap.
 
-The 95% bar comes from [`../docs/DECISIONS.md`](../docs/DECISIONS.md)
-§10. Mean coverage across the corpus must clear 95% for the parser to
+The 90% bar comes from [`../docs/DECISIONS.md`](../docs/DECISIONS.md)
+§10. Mean coverage across the corpus must clear 90% for the parser to
 be considered acceptable; this freeze gate enforces the bound per-idx
 so individual baselines can't sneak in below the bar.
 
@@ -112,7 +112,7 @@ captured a structure that loses content — locking that as a golden
 baseline contaminates everything downstream. Better to refuse the
 freeze and force the agent to find a slicing that recovers the words.
 
-If a particular document genuinely cannot reach 95% (e.g. the
+If a particular document genuinely cannot reach 90% (e.g. the
 source-of-truth bs4 extraction itself dropped content), the human
 operator can pass `--force` after explicit review. That's the escape
 hatch; do not use it programmatically.

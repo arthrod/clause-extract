@@ -33,6 +33,55 @@ signature filing trailers like press releases or company boilerplate).
 Those get tagged `scope="trailer"` and stay out of the JSONL; they do
 not affect which agreement types we accept.
 
+## Title is the root of the agreement
+
+The agreement's **title** is its identifier. It is the semantic root
+of the agreement's tree. Every clause in the agreement is a descendant
+of the title; depth is measured by ancestry from the title down.
+
+This gives the scope rule a single, purely structural criterion:
+
+> **If a record cannot be placed as a descendant of the agreement
+> title, it is not part of the agreement.**
+
+No phrase matching. No case-by-case scope judgment. The model handles
+the awkward edges cleanly:
+
+  - **Pre-title cover wedges** — registrant short name, exhibit tag,
+    filing date stamp, anything that appears BEFORE the agreement title
+    in document order. The title doesn't yet exist at that point, so
+    these can't descend from it. → out of scope. Dropped from the JSONL.
+  - **Post-signature filing trailers** — press releases, forward-
+    looking-statement boilerplate, contact-info blocks, page footers.
+    They appear AFTER the signature subtree, which is the agreement's
+    last L1 descendant. They sit outside the title's subtree. → out of
+    scope.
+  - **Real attached subdocuments** — "EXHIBIT A — FORM OF NOTICE",
+    "SCHEDULE 2 — DEFINITIONS", an "ANNEX I" addendum. They appear
+    inside the agreement body, attached to or referenced by the main
+    agreement. They DO descend from the title. → in scope, with a +1
+    depth penalty (see "Subdocument depth penalty" below).
+
+### Why the word "Exhibit" can be in OR out of scope
+
+Both the SEC filing envelope ("EXHIBIT 10.25") and a real attached
+subdocument ("EXHIBIT A — FORM OF NOTICE") use the word "EXHIBIT".
+They are different things, distinguished by **structure**, not by the
+word:
+
+| feature                  | "EXHIBIT 10.25" (envelope) | "EXHIBIT A" (attached subdoc)          |
+|--------------------------|----------------------------|-----------------------------------------|
+| position in document     | BEFORE the agreement title | AFTER / inside the main body            |
+| body                     | empty (just the tag)       | substantive (form text, defined terms)  |
+| `cls`                    | `exhibit`                  | `exhibit`                               |
+| `is_envelope`            | `True`                     | `False`                                 |
+| descended from title?    | NO (precedes title)        | YES (referenced by / attached to body)  |
+| in JSONL?                | DROPPED                    | INCLUDED, +1 depth penalty              |
+
+Same word, opposite scope decisions, decided structurally. The parser
+does not blocklist "EXHIBIT" or any phrase; it inspects descent from
+the title.
+
 ## JSONL record shape
 
 The parser at `scripts/parse_doc2dict_with_config.py` emits one JSONL

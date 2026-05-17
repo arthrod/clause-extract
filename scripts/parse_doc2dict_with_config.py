@@ -586,6 +586,27 @@ def _apply_scope_rule(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         first_child_title = children[0]["title"] if children else None
         if _is_real_subdoc_title(r.get("title"), r.get("cls"), r.get("is_envelope", False), first_child_title):
             real_subdoc_ids.add(r["node_id"])
+        else:
+            # Secondary-agreement carrier: a node whose own subdoc_penalty
+            # is 0 but whose direct children carry subdoc_penalty>=1.
+            # The depth-walker sets this when a non-subdoc-class section has
+            # a title matching the AGREEMENT|PLAN structural-level-0 pattern
+            # and the primary L0 has already been emitted (see walk_sections'
+            # is_secondary_agreement branch). Structurally this IS an
+            # attached subdocument (it has its own subtree with its own
+            # depth penalty) even though doc2dict didn't tag its cls as
+            # exhibit/schedule/appendix/annex. Treat it as a real subdoc
+            # for scope purposes so the post-sig walk-up doesn't strand it
+            # in trailer (and bring genuine attached subdoc content with
+            # it). The check is purely structural: subdoc_penalty arithmetic
+            # comes from the tree walk, not phrase matching.
+            if (
+                not r.get("is_envelope")
+                and (r.get("subdoc_penalty", 0) or 0) == 0
+                and children
+                and any((c.get("subdoc_penalty", 0) or 0) > 0 for c in children)
+            ):
+                real_subdoc_ids.add(r["node_id"])
 
     def _is_descendant_of_subdoc(row: dict[str, Any]) -> bool:
         current_id = row.get("parent_node_id")

@@ -3934,16 +3934,123 @@ def _explode_signature_block_lines(
 
     # Pin the IWW operating clause depth=1.
     iww_present = False
+    iww_carriers: list[dict[str, Any]] = []
     for r in actives:
         span = _span_text(r)
         if _is_iww_clause(span):
             r["depth"] = 1 + (r.get("subdoc_penalty") or 0)
             iww_present = True
+            iww_carriers.append(r)
 
-    if not any(_SIGN_OFF_RE.search(_span_text(r)) for r in actives):
-        # No /s/ anywhere — nothing more to do. Even modern agreements
-        # without an IWW clause will have /s/ lines or we don't treat
-        # this as a signature area.
+    has_slash_s = any(_SIGN_OFF_RE.search(_span_text(r)) for r in actives)
+    if not has_slash_s and not iww_present:
+        # No /s/ anywhere AND no IWW clause — nothing more to do.
+        # Without either a /s/ carrier or an IWW anchor we have no
+        # structural cue that a signature area exists at all.
+        return rows
+
+    if not has_slash_s and iww_present:
+        # Form/template case: IWW is present but no /s/ marks (because
+        # nobody actually signed the form — only placeholder By:/Name:/
+        # Title: fields). Treat IWW records as the signature-page anchor
+        # and demote IWW-sibling sig-shape records to L2.
+        #
+        # The walk is bounded to records that share a parent with an IWW
+        # record (and their descendants). We do not filter by node_id
+        # position because doc2dict's tree ordering for promoted leaves
+        # is not guaranteed to be document order — the IWW record may be
+        # appended at the end of the sibling list even though the
+        # signature page (party label + By/Name/Title fields) appears
+        # earlier in node-id order. Sig-shape detection (SIG_FIELD_RE,
+        # SIG_BLOCK_LABEL_RE, CORP_SUFFIX_LABEL_RE) does the filtering.
+        sig_line_node_ids: set[int] = set()
+
+        # Build child-index for descendant walks.
+        children_of_local: dict[int | None, list[dict[str, Any]]] = {}
+        for r in rows:
+            children_of_local.setdefault(r.get("parent_node_id"), []).append(r)
+
+        def _walk_descendants_local(nid: int) -> list[dict[str, Any]]:
+            out: list[dict[str, Any]] = []
+            stack = [nid]
+            seen: set[int] = set()
+            while stack:
+                cur = stack.pop()
+                if cur in seen:
+                    continue
+                seen.add(cur)
+                for c in children_of_local.get(cur, []):
+                    out.append(c)
+                    stack.append(c["node_id"])
+            return out
+
+        # Set of parent_node_ids to consider — every parent that contains
+        # an IWW record as a child.
+        sig_area_parent_ids: set[int | None] = {
+            iww.get("parent_node_id") for iww in iww_carriers
+        }
+        for parent_id in sig_area_parent_ids:
+            siblings = children_of_local.get(parent_id, [])
+            for sib in siblings:
+                if sib.get("is_envelope") or sib.get("scope") == "trailer":
+                    continue
+                if _has_section_marker_title(sib):
+                    # A numbered/lettered section is agreement content
+                    # (a top body clause), not a sig fragment.
+                    continue
+                # Skip the IWW record itself — it stays L1.
+                if _is_iww_clause(_span_text(sib)):
+                    continue
+                sib_title = (sib.get("title") or "").strip()
+                sib_body = (sib.get("body_direct") or "").strip()
+                looks_sig = (
+                    _SIG_FIELD_RE.match(sib_title)
+                    or _SIG_FIELD_RE.match(sib_body)
+                    or (sib_title and _SIG_BLOCK_LABEL_RE.match(sib_title))
+                    or (sib_title and _CORP_SUFFIX_LABEL_RE.match(sib_title))
+                    or (not sib_title and sib_body and _SIG_FIELD_RE.match(sib_body))
+                )
+                if looks_sig:
+                    sig_line_node_ids.add(sib["node_id"])
+                    # Walk descendants of this sig-shape sibling so
+                    # nested labels/fields (e.g. a "Holder" child under
+                    # a party-label parent) are also demoted to L2.
+                    for d in _walk_descendants_local(sib["node_id"]):
+                        if d.get("is_envelope") or d.get("scope") == "trailer":
+                            continue
+                        if _has_section_marker_title(d):
+                            continue
+                        if _is_iww_clause(_span_text(d)):
+                            continue
+                        d_title = (d.get("title") or "").strip()
+                        d_body = (d.get("body_direct") or "").strip()
+                        d_looks_sig = (
+                            _SIG_FIELD_RE.match(d_title)
+                            or _SIG_FIELD_RE.match(d_body)
+                            or (d_title and _SIG_BLOCK_LABEL_RE.match(d_title))
+                            or (d_title and _CORP_SUFFIX_LABEL_RE.match(d_title))
+                            or (d_title and not d_body)  # bare name as title
+                            or (not d_title and d_body and _SIG_FIELD_RE.match(d_body))
+                        )
+                        if d_looks_sig:
+                            sig_line_node_ids.add(d["node_id"])
+
+        # PASS 3 (IWW-anchored variant): pin each identified sig-line
+        # record at depth 2 (+ subdoc_penalty). Same contract as the
+        # /s/-anchored path: preserve doc2dict's grouping at L2.
+        for r in rows:
+            if r.get("is_envelope") or r.get("scope") == "trailer":
+                continue
+            if r["node_id"] not in sig_line_node_ids:
+                continue
+            if r.get("depth") == 0:
+                continue
+            if _is_iww_clause(_span_text(r)):
+                continue
+            l2_depth = 2 + (r.get("subdoc_penalty") or 0)
+            r["depth"] = l2_depth
+            r["_sig_line"] = True
+
         return rows
 
     # Build a set of sig-line node_ids using tree-chain expansion from

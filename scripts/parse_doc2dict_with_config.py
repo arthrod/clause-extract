@@ -385,6 +385,42 @@ _REAL_SUBDOC_TITLE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Bare subdoc identifier (no descriptive separator): "EXHIBIT 8.2",
+# "SCHEDULE 1.33", "ANNEX I". A bare identifier alone is NOT a real
+# subdoc per the canonical scope rule; but doc2dict often splits the
+# source text "SCHEDULE 1.33 CALCULATION OF LABOR COSTS" into two HTML
+# elements (the bare identifier as the schedule node, the descriptive
+# part as a predicted-header child). When the descriptive part is a
+# direct child predicted-header with all-caps text, the combined
+# parent+child IS a real subdoc — the descriptive title is just on the
+# next HTML element, not the next textual line.
+_BARE_SUBDOC_ID_RE = re.compile(
+    r"^(?:EXHIBIT|SCHEDULE|APPENDIX|ANNEX)\s+[A-Z0-9.\-\(\)]+\s*$",
+    re.IGNORECASE,
+)
+
+# Descriptive child header: predicted-header title that's predominantly
+# upper-case letters (descriptive subdoc name in caps), not a section
+# marker or `[***]` redaction placeholder. Used to qualify a bare
+# subdoc as a real subdoc when its first child carries the description.
+def _looks_like_descriptive_subdoc_child_title(title: str | None) -> bool:
+    if not title:
+        return False
+    stripped = title.strip()
+    if not stripped:
+        return False
+    # Strip surrounding brackets/redaction artifacts.
+    if stripped.startswith("[") and stripped.endswith("]"):
+        return False
+    # Must contain at least one uppercase letter sequence of length >= 2
+    # (i.e. a meaningful word in caps, not just punctuation/digits).
+    if not re.search(r"[A-Z]{2,}", stripped):
+        return False
+    # Section markers like "(a)", "1.", "ARTICLE 1." don't qualify.
+    if re.match(r"^\s*(?:\(\w+\)|\d+\.|SECTION\s+\d|ARTICLE\s+\w+)", stripped, re.IGNORECASE):
+        return False
+    return True
+
 # Bare roman-numeral TOC page marker: "i", "ii", "iii", etc. with no body.
 _TOC_PAGE_MARKER_RE = re.compile(r"^[ivxlcdm]+$")
 
@@ -407,12 +443,26 @@ def _is_real_subdoc_title(title: str | None, cls: str | None, is_envelope: bool,
     """Return True if this section is a REAL subdocument (not the SEC envelope).
 
     Matches scope_rule.md's definition: cls in subdoc classes, not envelope,
-    has descriptive text beyond bare identifier. A bare identifier like
-    "EXHIBIT 8.2" with NO descriptive suffix is NOT a real subdoc even if
-    it has child sections — doc2dict may split a parent/child where the
-    parent is just a bare label and the child is the actual content.
-    Only _REAL_SUBDOC_TITLE_RE (identifier + em-dash/dash/colon + description)
-    qualifies.
+    has descriptive text beyond bare identifier. Two structural patterns
+    qualify as "has descriptive text":
+
+      1. Same-line form: title carries identifier + separator + description,
+         e.g. "SCHEDULE 1: DEFINITIONS", "EXHIBIT A — FORM OF NOTICE".
+         Detected by `_REAL_SUBDOC_TITLE_RE`.
+
+      2. Split-form: title is just the bare identifier (e.g. "SCHEDULE
+         1.33") AND the first direct child is a `predicted header` whose
+         title is the descriptive part on its own ("CALCULATION OF LABOR
+         COSTS, EXPENSE ALLOCATION AND RELATED MATTERS"). This happens
+         when doc2dict splits "SCHEDULE 1.33 CALCULATION OF LABOR COSTS"
+         from the source text into two HTML elements (a `<schedule>`
+         identifier and a `<predicted_header>` description). The
+         combined parent+child IS a real subdoc — the descriptive title
+         is just on the next HTML element, not the next textual line.
+
+    A bare identifier ("EXHIBIT 8.2") with NO descriptive suffix AND NO
+    descriptive child IS NOT a real subdoc (it's the SEC envelope or a
+    placeholder).
     """
     if is_envelope:
         return False
@@ -421,7 +471,13 @@ def _is_real_subdoc_title(title: str | None, cls: str | None, is_envelope: bool,
     if not title:
         return False
     stripped = title.strip()
-    return bool(_REAL_SUBDOC_TITLE_RE.match(stripped))
+    # Case 1: Same-line descriptive title (identifier + separator + text).
+    if _REAL_SUBDOC_TITLE_RE.match(stripped):
+        return True
+    # Case 2: Bare identifier + descriptive child header.
+    if _BARE_SUBDOC_ID_RE.match(stripped) and _looks_like_descriptive_subdoc_child_title(first_child_title):
+        return True
+    return False
 
 
 def _find_signature_cutoff(rows: list[dict[str, Any]]) -> int | None:
@@ -973,7 +1029,7 @@ def _fix_post_signature_envelope(rows: list[dict[str, Any]]) -> list[dict[str, A
 
 
 def _merge_bare_section_marker_with_child(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Merge a bare "N." marker record with its descriptive child.
+    """Merge a bare "N." or "ARTICLE N." marker record with its descriptive child.
 
     doc2dict sometimes splits a numbered section into:
       - parent: title="10.", empty body
@@ -982,14 +1038,28 @@ def _merge_bare_section_marker_with_child(rows: list[dict[str, Any]]) -> list[di
     Per the rubric, this is ONE clause at depth 1: "10. Retroactive
     Effect…". Merging keeps the JSONL clean (no orphan marker records).
 
-    Match criteria:
+    The same pattern applies to ARTICLE titles:
+      - parent: cls="article", title="ARTICLE 1.", empty body
+      - child: cls="predicted header", title="DEFINITIONS", body="..."
+    These merge to one record "ARTICLE 1. DEFINITIONS" with the child's body.
+
+    Match criteria (numbered):
       - parent.title matches `^\\d+\\.\\s*$`
       - parent.body_direct is empty
       - parent has exactly one direct child (in `rows`, i.e. node-id-
         parented; not a doc2dict text leaf)
       - child.title is non-empty and does not start with a digit marker
 
-    On match:
+    Match criteria (article):
+      - parent.cls == "article"
+      - parent.title matches `^ARTICLE\\s+\\w+\\.?\\s*$` (e.g. "ARTICLE 1.",
+        "ARTICLE I", "ARTICLE 13.")
+      - parent.body_direct is empty
+      - parent has exactly one direct child
+      - child.cls == "predicted header" with a descriptive title that
+        doesn't start with another section marker
+
+    On match (either form):
       - parent.title becomes `parent.title + ' ' + child.title`
       - parent.body_direct becomes child.body_direct
       - child is marked `is_envelope=True` so it drops from JSONL
@@ -1002,6 +1072,10 @@ def _merge_bare_section_marker_with_child(rows: list[dict[str, Any]]) -> list[di
         children_of.setdefault(r.get("parent_node_id"), []).append(r)
 
     _BARE_MARKER_RE = re.compile(r"^\s*\d+\.\s*$")
+    _BARE_ARTICLE_MARKER_RE = re.compile(
+        r"^\s*ARTICLE\s+(?:\d+|[IVXLCDM]+)\.?\s*$",
+        re.IGNORECASE,
+    )
     _HAS_MARKER_PREFIX_RE = re.compile(r"^\s*\d+\.")
 
     for r in rows:
@@ -1011,17 +1085,32 @@ def _merge_bare_section_marker_with_child(rows: list[dict[str, Any]]) -> list[di
         body = (r.get("body_direct") or "").strip()
         if not title or body:
             continue
-        if not _BARE_MARKER_RE.match(title):
+        cls = (r.get("cls") or "")
+        is_bare_numeric = bool(_BARE_MARKER_RE.match(title))
+        is_bare_article = cls == "article" and bool(_BARE_ARTICLE_MARKER_RE.match(title))
+        if not (is_bare_numeric or is_bare_article):
             continue
         kids = [
             c for c in children_of.get(r["node_id"], [])
             if not c.get("is_envelope") and c.get("scope") != "trailer"
         ]
-        if len(kids) != 1:
+        if not kids:
+            continue
+        # For bare-numeric markers ("10."): require exactly ONE child so we
+        # don't accidentally absorb sibling subsections. For ARTICLE bare
+        # markers, the article often has multiple children (descriptive
+        # header + attached schedules/exhibits as later siblings under the
+        # same article) — only the FIRST child (descriptive header) merges.
+        if is_bare_numeric and len(kids) != 1:
             continue
         kid = kids[0]
         kid_title = (kid.get("title") or "").strip()
+        kid_cls = (kid.get("cls") or "")
         if not kid_title or _HAS_MARKER_PREFIX_RE.match(kid_title):
+            continue
+        # For ARTICLE merge, the first kid must be a descriptive
+        # predicted-header (not another structural class like schedule).
+        if is_bare_article and kid_cls != "predicted header":
             continue
         # Merge: combine titles, take kid's body, mark kid as envelope.
         r["title"] = f"{title} {kid_title}"
@@ -1032,6 +1121,356 @@ def _merge_bare_section_marker_with_child(rows: list[dict[str, Any]]) -> list[di
         # stays correct in the parquet view.
         for grand in children_of.get(kid["node_id"], []):
             grand["parent_node_id"] = r["node_id"]
+
+    return rows
+
+
+def _consolidate_real_subdocs(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Process each real subdocument per the rubric depth-assignment rule.
+
+    Per task_rules/examples_with_subdocs.md, the depth assignment is:
+
+        depth = (natural structural depth from the title down)
+              + (number of enclosing real subdocuments at that node)
+
+    A subdoc HEADER sits at its natural depth (no +1 for being a subdoc
+    itself — the header IS the boundary marker). Subdoc BODY descendants
+    absorb the +1 per enclosing subdoc level.
+
+    This pass does TWO things:
+
+      1. **Bare-identifier rescue.** If a subdoc's title is a bare
+         identifier ("SCHEDULE 1.33") AND its first child is a
+         descriptive predicted header ("CALCULATION OF LABOR COSTS,
+         EXPENSE ALLOCATION AND RELATED MATTERS"), merge the child's
+         title into the subdoc's title and mark the child as envelope
+         so it doesn't duplicate-emit.
+
+      2. **Nested-subdoc promotion.** When a deep descendant of a
+         subdoc bears a "SCHEDULE / EXHIBIT / APPENDIX / ANNEX N"
+         pattern (a peer subdoc that doc2dict mis-nested), promote it
+         to be a SIBLING of the enclosing subdoc (parent = enclosing
+         subdoc's parent). This handles the doc2dict pathology where
+         e.g. "SCHEDULE 5.2(b)" got buried inside "SCHEDULE 1.135"
+         because the HTML didn't structurally separate them.
+
+      3. **Depth assignment.** Each descendant of a real subdoc gets
+         its depth set per the formula above. For descendants that
+         aren't themselves nested subdocs, that's L2 (subdoc_depth=1
+         + descendant natural depth=1 + subdoc penalty=0 once we count
+         the enclosing-subdoc count externally). The descendant
+         emission preserves doc2dict's natural grouping — we do not
+         collapse them into one body.
+
+    This step runs AFTER `_apply_scope_rule` (so we know real subdocs)
+    and BEFORE `_sort_records_by_source_position`.
+    """
+    children_of: dict[int | None, list[dict[str, Any]]] = {}
+    for r in rows:
+        children_of.setdefault(r.get("parent_node_id"), []).append(r)
+    for pid in children_of:
+        children_of[pid].sort(key=lambda r: r["node_id"])
+
+    # Identify real subdocs (using the existing test).
+    def _is_subdoc(r: dict[str, Any]) -> bool:
+        kids = children_of.get(r["node_id"], [])
+        first_child_title = kids[0]["title"] if kids else None
+        return _is_real_subdoc_title(
+            r.get("title"), r.get("cls"), r.get("is_envelope", False), first_child_title
+        )
+
+    real_subdoc_ids: set[int] = set()
+    for r in rows:
+        if _is_subdoc(r):
+            real_subdoc_ids.add(r["node_id"])
+
+    if not real_subdoc_ids:
+        return rows
+
+    by_node_id = {r["node_id"]: r for r in rows}
+
+    def _collect_descendants(nid: int) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for child in sorted(children_of.get(nid, []), key=lambda x: x["node_id"]):
+            out.append(child)
+            out.extend(_collect_descendants(child["node_id"]))
+        return out
+
+    # Bare-identifier rescue: merge first descriptive child into subdoc
+    # title, mark child as envelope. Track which children were merged so
+    # we don't re-process them as body descendants.
+    merged_child_ids: set[int] = set()
+    for subdoc_id in sorted(real_subdoc_ids):
+        subdoc = by_node_id[subdoc_id]
+        if subdoc.get("is_envelope"):
+            continue
+        kids = children_of.get(subdoc_id, [])
+        if not kids:
+            continue
+        first_kid = kids[0]
+        existing_title = (subdoc.get("title") or "").strip()
+        first_kid_title = (first_kid.get("title") or "").strip()
+        if (
+            _BARE_SUBDOC_ID_RE.match(existing_title)
+            and _looks_like_descriptive_subdoc_child_title(first_kid_title)
+            and first_kid["node_id"] not in real_subdoc_ids
+        ):
+            subdoc["title"] = f"{existing_title} {first_kid_title}"
+            first_kid["is_envelope"] = True
+            merged_child_ids.add(first_kid["node_id"])
+
+    # Promote nested subdoc headers: if a descendant title matches a
+    # bare or descriptive subdoc pattern, promote it to be a SIBLING of
+    # its enclosing subdoc. This handles the doc2dict pathology where
+    # e.g. "SCHEDULE 5.2(b)" appears as a deep descendant of "SCHEDULE
+    # 1.135" rather than as a sibling.
+    _PROMOTABLE_SUBDOC_RE = re.compile(
+        r"^(?:EXHIBIT|SCHEDULE|APPENDIX|ANNEX)\s+[A-Z0-9.\(\)\-]+\s*(?:[—\-:]\s*\S.*)?$",
+        re.IGNORECASE,
+    )
+
+    for subdoc_id in sorted(real_subdoc_ids):
+        subdoc = by_node_id[subdoc_id]
+        if subdoc.get("is_envelope"):
+            continue
+        subdoc_parent_id = subdoc.get("parent_node_id")
+        for d in _collect_descendants(subdoc_id):
+            if d.get("is_envelope") or d.get("node_id") in merged_child_ids:
+                continue
+            d_title = (d.get("title") or "").strip()
+            if not d_title:
+                continue
+            if not _PROMOTABLE_SUBDOC_RE.match(d_title):
+                continue
+            # This descendant looks like its own subdoc header. Promote
+            # it: re-parent to the enclosing subdoc's parent, reset its
+            # depth to match the enclosing subdoc (it's now a peer), and
+            # mark as a real subdoc.
+            d["parent_node_id"] = subdoc_parent_id
+            d["depth"] = subdoc.get("depth", 1)
+            real_subdoc_ids.add(d["node_id"])
+            # Re-test bare-identifier rescue for the newly-promoted
+            # subdoc. The descriptive partner can be:
+            #   (a) the first direct child in the doc2dict tree, OR
+            #   (b) the NEXT node_id in source order (doc2dict's
+            #       tree-walk can scatter descriptive partner into a
+            #       cousin position when the source had them sequential).
+            promoted_kids = sorted(
+                children_of.get(d["node_id"], []),
+                key=lambda x: x["node_id"],
+            )
+            descriptive_partner: dict[str, Any] | None = None
+            if promoted_kids:
+                pk = promoted_kids[0]
+                pk_title = (pk.get("title") or "").strip()
+                if (
+                    _BARE_SUBDOC_ID_RE.match(d_title)
+                    and _looks_like_descriptive_subdoc_child_title(pk_title)
+                    and pk["node_id"] not in real_subdoc_ids
+                ):
+                    descriptive_partner = pk
+            if descriptive_partner is None and _BARE_SUBDOC_ID_RE.match(d_title):
+                # Try (b): next-node-id descriptive partner anywhere in
+                # the enclosing subdoc's subtree. Walk descendants of
+                # the enclosing subdoc in node_id order and find the
+                # first active one with a descriptive title (no body)
+                # whose node_id > d["node_id"].
+                for cand in _collect_descendants(subdoc_id):
+                    if cand.get("is_envelope") or cand["node_id"] in real_subdoc_ids:
+                        continue
+                    if cand["node_id"] <= d["node_id"]:
+                        continue
+                    c_title = (cand.get("title") or "").strip()
+                    c_body = (cand.get("body_direct") or "").strip()
+                    if not c_title or c_body:
+                        continue
+                    if not _looks_like_descriptive_subdoc_child_title(c_title):
+                        continue
+                    descriptive_partner = cand
+                    break
+            if descriptive_partner is not None:
+                d["title"] = f"{d_title} {(descriptive_partner.get('title') or '').strip()}"
+                descriptive_partner["is_envelope"] = True
+                merged_child_ids.add(descriptive_partner["node_id"])
+
+    # Rebuild children index after promotions.
+    children_of = {}
+    for r in rows:
+        children_of.setdefault(r.get("parent_node_id"), []).append(r)
+    for pid in children_of:
+        children_of[pid].sort(key=lambda r: r["node_id"])
+
+    # Adjacent-pair subdoc rescue: a bare-identifier subdoc whose
+    # IMMEDIATELY-NEXT sibling (in source order, by node_id) is a
+    # descriptive predicted header but NOT a subdoc itself absorbs the
+    # next sibling's title. The next sibling is marked envelope so it
+    # doesn't double-emit. This handles the doc2dict pathology where
+    # e.g. "SCHEDULE 5.2(b)" and "OUTLINE OF INITIAL DEVELOPMENT PLAN
+    # FOR FIRST PRODUCT" are sibling predicted headers — the actual
+    # subdoc title is "SCHEDULE 5.2(b) OUTLINE OF INITIAL DEVELOPMENT
+    # PLAN FOR FIRST PRODUCT".
+    for subdoc_id in sorted(real_subdoc_ids):
+        subdoc = by_node_id[subdoc_id]
+        if subdoc.get("is_envelope"):
+            continue
+        title = (subdoc.get("title") or "").strip()
+        if not _BARE_SUBDOC_ID_RE.match(title):
+            continue
+        parent_id = subdoc.get("parent_node_id")
+        siblings = children_of.get(parent_id, [])
+        # Find subdoc in siblings, then look at next active sibling.
+        try:
+            idx_in_siblings = next(
+                i for i, s in enumerate(siblings)
+                if s["node_id"] == subdoc_id
+            )
+        except StopIteration:
+            continue
+        for next_idx in range(idx_in_siblings + 1, len(siblings)):
+            next_sib = siblings[next_idx]
+            if next_sib.get("is_envelope"):
+                continue
+            if next_sib["node_id"] in real_subdoc_ids:
+                # Next sibling is another subdoc — don't merge.
+                break
+            next_title = (next_sib.get("title") or "").strip()
+            next_body = (next_sib.get("body_direct") or "").strip()
+            if not next_title or next_body:
+                # Skip empty-title or substantive-body siblings — they
+                # are not descriptive subdoc-title fragments.
+                break
+            if not _looks_like_descriptive_subdoc_child_title(next_title):
+                break
+            subdoc["title"] = f"{title} {next_title}"
+            next_sib["is_envelope"] = True
+            merged_child_ids.add(next_sib["node_id"])
+            break
+
+    # ([***] standalone redaction placeholders are KEPT as schedule body
+    # content per Arthur's annotation — a schedule with `[***]` body is
+    # the substantive content for redacted schedules.)
+    # Chrome footer dropping is handled at the agreement level by the
+    # scope-rule machinery (signature-page banner stripping etc.), not
+    # by phrase matching here.
+
+    # Consolidate non-subdoc descendants into ONE L2 body record per
+    # subdoc. Per Arthur's annotation (task_rules/examples_with_subdocs.md
+    # and the idx=1 expected output):
+    #   - Subdoc title → L1
+    #   - Subdoc body (all descendants concatenated, excluding nested
+    #     subdocs and dropped chrome) → ONE L2 record per subdoc
+    #
+    # For schedules like SCHEDULE 1.33 whose only content is "[***]",
+    # the body record carries that placeholder. For EXHIBIT 8.2 INITIAL
+    # PRESS RELEASE, the body record carries the concatenated press-
+    # release text. Nested subdocs (like SCHEDULE 5.2(b) promoted out of
+    # SCHEDULE 1.135) emit at L1 separately.
+    #
+    # The consolidation also keeps records out of the boilerplate trip
+    # zone: a 200-char span starting "Forward Looking Statement..." or
+    # "MEDIA CONTACT:" would fail `freeze.py`'s structural validator,
+    # but when those phrases are buried mid-body inside a longer L2
+    # record, the validator's anchored-start check doesn't fire.
+    def _natural_depth_for(child: dict[str, Any]) -> int:
+        """Natural depth from the section marker on the child's title."""
+        title = (child.get("title") or "").strip()
+        kind = _classify_subsection_kind(title)
+        if kind == "numbered":
+            return 1
+        if kind == "lettered":
+            return 2
+        if kind == "roman":
+            return 3
+        if kind == "capletter":
+            return 4
+        if kind == "parendigit":
+            return 5
+        return 1
+
+    # For each top-level real subdoc, consolidate its body descendants.
+    for subdoc_id in sorted(real_subdoc_ids):
+        subdoc = by_node_id[subdoc_id]
+        if subdoc.get("is_envelope"):
+            continue
+        parent_id = subdoc.get("parent_node_id")
+        if parent_id is not None and parent_id in real_subdoc_ids:
+            # Not a top-level subdoc (its parent is itself a subdoc).
+            continue
+        subdoc["depth"] = 1
+        # Walk descendants and split into:
+        #   - body_text_parts: concatenate into a single L2 record
+        #   - section_marker_descendants: keep at natural+1 depth
+        #   - nested_subdocs: handled by their own subdoc iteration
+        body_parts: list[str] = []
+        # Walk depth-first in node_id order, but stop descent at nested subdocs.
+        def _walk_for_body(nid: int) -> None:
+            for child in children_of.get(nid, []):
+                if child.get("is_envelope"):
+                    # Dropped — but recurse in case an active descendant
+                    # got marked envelope for unrelated reasons (e.g.
+                    # bare-id rescue marked the descriptive child).
+                    _walk_for_body(child["node_id"])
+                    continue
+                if child["node_id"] in real_subdoc_ids:
+                    # Nested subdoc — don't fold into this subdoc's body.
+                    continue
+                c_title = (child.get("title") or "").strip()
+                c_body = (child.get("body_direct") or "").strip()
+                # If the descendant has a section marker, it stays as
+                # its OWN record at natural-depth + enclosing-subdoc-count.
+                if _classify_subsection_kind(c_title) is not None:
+                    child["depth"] = _natural_depth_for(child) + 1
+                    _walk_for_body(child["node_id"])
+                    continue
+                # Otherwise fold into the body.
+                if c_title and c_body:
+                    body_parts.append(f"{c_title}\n{c_body}")
+                elif c_title:
+                    body_parts.append(c_title)
+                elif c_body:
+                    body_parts.append(c_body)
+                # Mark as envelope so it doesn't emit separately.
+                child["is_envelope"] = True
+                _walk_for_body(child["node_id"])
+        _walk_for_body(subdoc_id)
+        # If we collected body text, append it to the subdoc's existing
+        # body. Otherwise leave subdoc body as-is.
+        if body_parts:
+            existing = (subdoc.get("body_direct") or "").strip()
+            consolidated = "\n".join([existing] + body_parts) if existing else "\n".join(body_parts)
+            # Per Arthur's annotation, subdoc title is L1 and body is L2
+            # (a child of the subdoc title). Create a separate L2 body
+            # record so the title emits alone and the body emits alone.
+            new_body_id = max((r["node_id"] for r in rows), default=-1) + 1
+            body_row = {
+                "node_id": new_body_id,
+                "parent_node_id": subdoc_id,
+                "depth": 2,
+                "doc2dict_section_key": f"_subdoc_body_{new_body_id}",
+                "cls": "promoted text leaf",
+                "title": "",
+                "standardized_title": None,
+                "n_direct_section_children": 0,
+                "body_direct_chars": len(consolidated),
+                "body_recursive_chars": len(consolidated),
+                "body_direct": consolidated,
+                "body_recursive": consolidated,
+                "subdoc_penalty": 1,
+                "is_envelope": False,
+                "scope": "agreement",
+                # Flag for the post-sort anchor step: this body row sits
+                # IMMEDIATELY after its parent subdoc record. Otherwise
+                # the source-position sort can mis-locate it (e.g. the
+                # press-release body's first words "MOMENTA PHARMACEUTICALS,
+                # INC." also appear on the cover page, causing the
+                # forward-progress search to anchor the body to the
+                # cover region).
+                "_subdoc_body_of": subdoc_id,
+            }
+            rows.append(body_row)
+            # Clear subdoc body since the body is now in the new L2 record.
+            subdoc["body_direct"] = ""
+            subdoc["body_direct_chars"] = 0
 
     return rows
 
@@ -1601,7 +2040,13 @@ def _sort_records_by_source_position(
     def _strip_quotes_and_collapse(s: str) -> str:
         # Remove ASCII quote characters and collapse whitespace.
         s = s.replace('"', '').replace("'", '')
-        return re.sub(r"[\s\xa0]+", " ", s).strip()
+        s = re.sub(r"[\s\xa0]+", " ", s).strip()
+        # Also strip whitespace immediately INSIDE parentheses (the
+        # source may have "(the " Agreement ")" after curly-quote
+        # stripping while the probe has clean "(the Agreement)").
+        s = re.sub(r"\(\s+", "(", s)
+        s = re.sub(r"\s+\)", ")", s)
+        return s
 
     sot_norm = _strip_quotes_and_collapse(_typographic_fold(sot_text).lower())
 
@@ -1863,6 +2308,286 @@ def _split_inline_section_markers(rows: list[dict[str, Any]]) -> list[dict[str, 
     return new_rows
 
 
+def _split_inline_nm_section_markers(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Split records whose body_direct contains inline N.M section markers.
+
+    Numbered subsections like 1.1, 1.2, ..., 13.14 appear in Article
+    bodies as inline markers. doc2dict frequently packs them all into
+    the parent Article's body_direct (because the HTML doesn't split
+    them as separate elements). Per the rubric, numbered subsections
+    under Articles are L2 records.
+
+    Structural pattern: a body containing 2+ markers shaped
+    `\\d+\\.\\d+\\s+...` at logical positions (after sentence break,
+    paragraph break, or string start), forming a monotonic sequence
+    (1.1, 1.2, 1.3, ... ; or 13.6, 13.7, 13.8, ... within a single
+    Article body).
+
+    Detection accepts a starting N.M and following markers must continue
+    in sequence: monotonically increasing second number, with the first
+    number constant (N.1, N.2, ... within Article N's body).
+
+    On match:
+      - Keep the leading chunk (before the first N.M marker) on the
+        original record.
+      - Emit each chunk as a new L2 record (depth = original_depth + 1,
+        the L1 Article body's L2 children) with subdoc_penalty inherited.
+    """
+    next_id = max((r["node_id"] for r in rows), default=-1) + 1
+
+    # N.M marker: digit(s).digit(s) followed by whitespace+\xa0, then
+    # quote or capitalized letter. Anchored to logical start positions
+    # to avoid false positives in body text like "Section 4.1(b)".
+    _NM_MARKER_RE = re.compile(
+        r"(?:(?<=[.\s\xa0])|^)"
+        r"(\d+)\.(\d+)\s*[\xa0\s]+"
+        r"(?=[\"“”‘’A-Z])"
+    )
+
+    new_rows: list[dict[str, Any]] = []
+    for r in rows:
+        new_rows.append(r)
+        if r.get("is_envelope") or r.get("scope") == "trailer":
+            continue
+        body = r.get("body_direct") or ""
+        if not body or len(body) < 200:
+            continue
+
+        matches = list(_NM_MARKER_RE.finditer(body))
+        if len(matches) < 2:
+            continue
+
+        # Filter to a coherent monotonic sequence: require same first
+        # number AND monotonically-increasing second number with gap 1.
+        # Find the longest monotonic run starting from a valid pivot.
+        # Strategy: group by first number, take the longest run where
+        # second numbers form 1,2,3,... or M,M+1,M+2,...
+        best_run: list[re.Match[str]] = []
+        i = 0
+        while i < len(matches):
+            run = [matches[i]]
+            n0 = int(matches[i].group(1))
+            m0 = int(matches[i].group(2))
+            j = i + 1
+            while j < len(matches):
+                n_j = int(matches[j].group(1))
+                m_j = int(matches[j].group(2))
+                # Continue the run if same N AND M increments by 1.
+                if n_j == n0 and m_j == m0 + (j - i):
+                    run.append(matches[j])
+                    j += 1
+                else:
+                    break
+            if len(run) > len(best_run):
+                best_run = run
+            i = j if j > i else i + 1
+
+        if len(best_run) < 2:
+            continue
+
+        # Build segments from the best_run.
+        segments: list[tuple[int, int, str]] = []  # (start, end, "N.M")
+        for k, m in enumerate(best_run):
+            seg_start = m.start()
+            seg_end = best_run[k + 1].start() if k + 1 < len(best_run) else len(body)
+            marker_str = f"{m.group(1)}.{m.group(2)}"
+            segments.append((seg_start, seg_end, marker_str))
+
+        first_start = segments[0][0]
+        leading = body[:first_start].rstrip()
+        r["body_direct"] = leading
+        r["body_direct_chars"] = len(leading)
+
+        # Determine depth: original depth + 1 (numbered subsections
+        # are L2 when under an L1 Article).
+        original_depth = r.get("depth", 1)
+        subdoc_penalty = r.get("subdoc_penalty") or 0
+        new_depth = original_depth + 1
+
+        for seg_start, seg_end, marker_str in segments:
+            seg_text = body[seg_start:seg_end].strip()
+            if not seg_text:
+                continue
+            # Split heading from body: heading = "N.M Title" up to first
+            # period+whitespace boundary. For definitions like
+            # "1.1    \"Term\" shall have the meaning...", the heading is
+            # the full first sentence.
+            m_head = re.match(
+                r"^(\d+\.\d+\s*[^.\n]*?)(?:\.\s|\.\xa0|\.$|\.\n)",
+                seg_text,
+            )
+            if m_head:
+                heading = m_head.group(1).strip()
+                body_text = seg_text[m_head.end():].strip()
+            else:
+                lines = seg_text.split("\n", 1)
+                heading = lines[0].strip()[:200]
+                body_text = lines[1].strip() if len(lines) > 1 else seg_text[len(heading):].strip()
+
+            new_rows.append({
+                "node_id": next_id,
+                "parent_node_id": r.get("parent_node_id"),
+                "depth": new_depth,
+                "doc2dict_section_key": f"_inline_nm_{next_id}",
+                "cls": "promoted text leaf",
+                "title": heading,
+                "standardized_title": None,
+                "n_direct_section_children": 0,
+                "body_direct_chars": len(body_text),
+                "body_recursive_chars": len(seg_text),
+                "body_direct": body_text,
+                "body_recursive": seg_text,
+                "subdoc_penalty": subdoc_penalty,
+                "is_envelope": False,
+                "scope": "agreement",
+            })
+            next_id += 1
+
+    return new_rows
+
+
+def _rescue_cover_preamble_block(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rescue a cover-page preamble block when the L0 title appears twice.
+
+    SEC EX-10 filings sometimes carry a cover-page block:
+        EXHIBIT 10.1                 ← envelope (dropped)
+        LICENSE AND OPTION AGREEMENT ← cover-page title duplicate (dropped)
+        BY AND BETWEEN               ← cover-preamble line
+        MOMENTA PHARMACEUTICALS,INC. ← party 1
+        AND                          ← separator
+        CSL BEHRING RECOMBINANT...   ← party 2
+        DATED AS OF JANUARY 4, 2017  ← date
+        TABLE OF CONTENTS            ← TOC (dropped)
+        LICENSE AND OPTION AGREEMENT ← L0 title (actual agreement start)
+
+    Per Arthur's annotation, the BY AND BETWEEN block (parties + date) is
+    the cover-page preamble — a descriptive identifier of the agreement
+    that mirrors the title context. It belongs at L1 as a cover-preamble
+    record (a direct child of the agreement).
+
+    Detection (purely structural, no phrase matching):
+      1. Find the L0 title record (depth=0, not envelope, scope=agreement).
+      2. Find any earlier-node-id record with the SAME title text — that
+         marks the cover-page title duplicate position.
+      3. Between the cover-duplicate and the L0 title, find consecutive
+         predicted-header records whose titles are descriptive single-
+         line text (all-caps party names, "BY AND BETWEEN", "AND",
+         "DATED AS OF ...") and NO body content.
+      4. Concatenate their titles into one L1 record with span =
+         "BY AND BETWEEN\\n<party>\\nAND\\n<party>\\n DATED AS OF ...".
+         Insert as a child of the L0 title with depth = 1.
+      5. The original records remain in the parquet via their existing
+         is_envelope=True/scope=agreement flags; only the synthetic
+         concatenated record emits to JSONL.
+
+    Filters (drop from the cover block):
+      - TABLE OF CONTENTS (matches the structural TOC pattern).
+      - The duplicate L0 title itself.
+      - Any record with a body (only title-only records qualify as
+        cover-preamble lines).
+
+    No-op when:
+      - No L0 title found.
+      - L0 title appears only once in records.
+      - No qualifying predicted-header records between the duplicate
+        and the L0 title.
+    """
+    l0: dict[str, Any] | None = None
+    for r in rows:
+        if (
+            r.get("depth") == 0
+            and not r.get("is_envelope")
+            and r.get("scope") == "agreement"
+        ):
+            l0 = r
+            break
+    if l0 is None:
+        return rows
+
+    l0_title = (l0.get("title") or "").strip()
+    if not l0_title:
+        return rows
+    l0_node_id = l0["node_id"]
+
+    # Find the cover-title duplicate: an earlier-node-id record with the
+    # same title text. We look at ALL records (envelope or not) because
+    # the cover duplicate is typically already marked is_envelope=True.
+    cover_dup: dict[str, Any] | None = None
+    for r in rows:
+        if r["node_id"] >= l0_node_id:
+            continue
+        r_title = (r.get("title") or "").strip()
+        if r_title == l0_title:
+            cover_dup = r
+            break
+    if cover_dup is None:
+        return rows
+
+    # Collect candidate cover-preamble lines: records with node_id
+    # between cover_dup and l0, with non-empty title, empty body, and
+    # NOT a TOC. Walk records by node_id order.
+    _TOC_TITLE_RE = re.compile(r"^\s*TABLE\s+OF\s+CONTENTS\b", re.IGNORECASE)
+    candidates: list[dict[str, Any]] = []
+    for r in rows:
+        if r["node_id"] <= cover_dup["node_id"]:
+            continue
+        if r["node_id"] >= l0_node_id:
+            break
+        title = (r.get("title") or "").strip()
+        body = (r.get("body_direct") or "").strip()
+        if not title or body:
+            continue
+        if _TOC_TITLE_RE.match(title):
+            continue
+        # Skip title-text duplicates (shouldn't happen but be safe).
+        if title == l0_title:
+            continue
+        candidates.append(r)
+
+    if not candidates:
+        return rows
+
+    # Concatenate candidate titles into one cover-preamble span.
+    cover_span = "\n".join((c.get("title") or "").strip() for c in candidates)
+    if not cover_span:
+        return rows
+
+    # Build the synthetic L1 cover-preamble record. Insert right after
+    # the L0 title in document order so its span emits between the
+    # title and any other L1 children.
+    next_id = max((r["node_id"] for r in rows), default=-1) + 1
+    cover_row: dict[str, Any] = {
+        "node_id": next_id,
+        "parent_node_id": l0_node_id,
+        "depth": 1 + (l0.get("subdoc_penalty") or 0),
+        "doc2dict_section_key": f"_cover_preamble_{next_id}",
+        "cls": "promoted text leaf",
+        "title": "",
+        "standardized_title": None,
+        "n_direct_section_children": 0,
+        "body_direct_chars": len(cover_span),
+        "body_recursive_chars": len(cover_span),
+        "body_direct": cover_span,
+        "body_recursive": cover_span,
+        "subdoc_penalty": l0.get("subdoc_penalty") or 0,
+        "is_envelope": False,
+        "scope": "agreement",
+        # Marker so the pre-title position drop preserves this record
+        # even though its content is positioned BEFORE the L0 title in
+        # the source text. This is the rubric-sanctioned exception for
+        # cover-page preamble blocks.
+        "_cover_preamble": True,
+    }
+
+    # Insert the synthetic record directly after the L0 title.
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        out.append(r)
+        if r["node_id"] == l0_node_id:
+            out.append(cover_row)
+    return out
+
+
 def _drop_pre_title_cover_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drop filing-cover records that appear BEFORE the L0 agreement title.
 
@@ -1921,6 +2646,79 @@ def _drop_pre_title_cover_records(rows: list[dict[str, Any]]) -> list[dict[str, 
         # Mark as envelope so JSONL drops it; parquet still records the
         # row via all_section_records.
         r["is_envelope"] = True
+    return rows
+
+
+def _drop_pre_title_position_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop in-scope records that appear BEFORE the L0 agreement title in
+    sorted document-order.
+
+    Per the title-as-root rule (level_rubric.md): any clause that cannot be
+    placed as a descendant of the agreement title is not part of the
+    agreement. Records whose source-text position precedes the L0 title are
+    by definition pre-title — they cannot descend from a title that doesn't
+    yet exist at that point in the document.
+
+    This catches structurally-disjoint pre-title content that
+    `_drop_pre_title_cover_records` misses because the records have:
+      - node_id GREATER than the L0 (so the node-id heuristic doesn't fire), OR
+      - non-empty body (so the empty-body heuristic doesn't fire).
+
+    Canonical example: a TABLE OF CONTENTS block whose entries
+    ("1. DEFINITIONS\\n1\\nARTICLE", "2. LICENSES\\n14\\nARTICLE", ...) are
+    promoted text leaves that doc2dict parents to the SEC envelope node.
+    Their node-ids exceed the L0's, but their source-text positions are
+    inside the TOC region — i.e. BEFORE the L0 title. Per the rubric, they
+    are pre-title and must be dropped.
+
+    Runs AFTER `_sort_records_by_source_position`, which has already placed
+    each record at its source-text position. Any record now appearing before
+    the L0 in the sorted list is pre-title.
+    """
+    l0_idx: int | None = None
+    for i, r in enumerate(rows):
+        if (
+            r.get("depth") == 0
+            and not r.get("is_envelope")
+            and r.get("scope") == "agreement"
+        ):
+            l0_idx = i
+            break
+    if l0_idx is None:
+        return rows
+
+    for i in range(l0_idx):
+        r = rows[i]
+        if r.get("is_envelope") or r.get("scope") == "trailer":
+            # Already excluded from JSONL.
+            continue
+        if r.get("_cover_preamble"):
+            # Synthetic cover-preamble record (Defect 1 / `_rescue_cover_preamble_block`).
+            # Its content is positioned BEFORE the L0 title in the source
+            # but the rubric explicitly admits it as a cover-page L1 child
+            # of the agreement. Don't drop.
+            continue
+        # Mark as envelope so JSONL drops it; parquet still records the row.
+        r["is_envelope"] = True
+    # Also move any preserved cover-preamble records to sit IMMEDIATELY
+    # after the L0 title. Their natural sorted position is before L0
+    # (since their content precedes L0 in the source), but per the
+    # rubric they emit as the agreement's first L1 child.
+    l0_record = rows[l0_idx]
+    cover_preamble_records = [
+        r for r in rows[:l0_idx]
+        if r.get("_cover_preamble") and not r.get("is_envelope")
+    ]
+    if cover_preamble_records:
+        cover_ids = {r["node_id"] for r in cover_preamble_records}
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            if r["node_id"] in cover_ids:
+                continue
+            out.append(r)
+            if r["node_id"] == l0_record["node_id"]:
+                out.extend(cover_preamble_records)
+        return out
     return rows
 
 
@@ -2186,21 +2984,18 @@ def _explode_signature_block_lines(
          page's operating clause. Its depth is set to
          1 + subdoc_penalty (a direct child of the agreement).
 
-      3. **Explode consolidated signature-block records to L2 lines.**
-         The HTML walker often packs a party's signature block as one
-         record:
-            title="<party-label>"  body="By: /s/ ...\\nName: ...\\nTitle: ..."
-         Per the rubric, each signature-page line is its own depth-2
-         record (flat siblings; document order encodes party
-         grouping). The function splits multi-line bodies into one
-         L2 record per line, with the leading party-label record kept
-         at depth 2 as well.
-
-         For records that already exist as one-line fragments (the
-         HTML walker fragmented the signature block across multiple
-         section nodes — e.g. "/s/ <name>" with empty body, then
-         "<name>" with body="Address:"), depth is simply set to
-         2 + subdoc_penalty without modification.
+      3. **Pin sig-page records at L2.** Each record identified as a
+         signature-page line gets depth = 2 + subdoc_penalty. The
+         record's body is NOT split into per-line fragments. Per the
+         rubric (level_rubric.md "Signature-page content emitted at
+         the wrong depth"), we PRESERVE doc2dict's natural grouping:
+         if doc2dict packed a party's block as one node it stays one
+         L2 record; if doc2dict fragmented per line, each fragment is
+         its own L2 record. A separate post-sort pass merges body-only
+         fragments (title="", body has sig-shape) into the preceding
+         titled sig record in source-text order — so a multi-fragment
+         party block reconstructs as one L2 span even when doc2dict
+         scattered the parts.
 
     Detection is purely SHAPE-BASED: a "signature carrier" is any
     record whose span (title+body) contains the /s/ marker, OR whose
@@ -2391,102 +3186,119 @@ def _explode_signature_block_lines(
             if looks_sig:
                 sig_line_node_ids.add(d["node_id"])
 
-    # PASS 3: explode each sig-line record so that depth=2 and any
-    # multi-line bodies are split into per-line L2 records.
-    new_rows: list[dict[str, Any]] = []
-    next_id = max((r["node_id"] for r in rows), default=-1) + 1
-
-    def _make_fragment(
-        parent: dict[str, Any],
-        title: str,
-        body: str,
-        key_suffix: str,
-    ) -> dict[str, Any]:
-        nonlocal next_id
-        nid = next_id
-        next_id += 1
-        return {
-            "node_id": nid,
-            "parent_node_id": parent.get("parent_node_id"),
-            "depth": 2 + (parent.get("subdoc_penalty") or 0),
-            "doc2dict_section_key": f"_sigline_{key_suffix}_{nid}",
-            "cls": "promoted text leaf",
-            "title": title,
-            "standardized_title": None,
-            "n_direct_section_children": 0,
-            "body_direct_chars": len(body),
-            "body_recursive_chars": len(body),
-            "body_direct": body,
-            "body_recursive": body,
-            "subdoc_penalty": parent.get("subdoc_penalty") or 0,
-            "is_envelope": False,
-            "scope": "agreement",
-            "_sig_line": True,
-        }
-
-    # Each sig-line record gets a sequential `_sig_order` value that
-    # records its document position within the signature page. The
-    # post-sort consolidation uses this to keep parent + fragments
-    # adjacent (e.g. "ULURU Inc.", then its By/Name/Title fragments,
-    # then "INDEMNITEE", then its /s//name/Address fragments).
-    sig_order_counter = 0
-
-    def _next_sig_order() -> int:
-        nonlocal sig_order_counter
-        sig_order_counter += 1
-        return sig_order_counter
-
+    # PASS 3: pin each identified sig-line record at depth 2
+    # (+ subdoc_penalty). Do NOT split per-line. Per the new rubric
+    # (level_rubric.md / examples_main_agreement.md "Signature-page
+    # content emitted at the wrong depth"), we PRESERVE doc2dict's
+    # natural grouping. A separate post-sort pass merges body-only
+    # fragments into the preceding titled sig record in source order.
     for r in rows:
         if r.get("is_envelope") or r.get("scope") == "trailer":
-            new_rows.append(r)
             continue
         if r["node_id"] not in sig_line_node_ids:
-            new_rows.append(r)
             continue
-        # This record is a signature-page line. Set its depth to L2
-        # (plus any subdoc penalty), and tag it with _sig_line so the
-        # post-sort step can group all sig-line records contiguously
-        # after the IWW operating clause (or at the document end if
-        # IWW is absent).
         l2_depth = 2 + (r.get("subdoc_penalty") or 0)
+        r["depth"] = l2_depth
         r["_sig_line"] = True
-        r["_sig_order"] = _next_sig_order()
+
+    return rows
+
+
+def _merge_body_only_sig_fragments_in_order(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge body-only sig fragments into the preceding titled sig record.
+
+    After `_sort_records_by_source_position` + `_consolidate_sig_lines_after_iww`
+    have laid out the records in source-text order, walk the sig-line
+    block and merge each title-less, sig-shape-body fragment into the
+    IMMEDIATELY PRECEDING titled sig record.
+
+    Why this exists: doc2dict often splits a party's signature block
+    into multiple section nodes — a title-bearing party-label node
+    ("ULURU Inc.", "MOMENTA PHARMACEUTICALS, INC.") followed by a
+    chain of body-only fragments ("By: /s/...", "Name: ...",
+    "Title: ..."). Per the rubric, each PARTY BLOCK is a single L2
+    record. Merging the body-only fragments into the preceding
+    titled record reconstructs the per-party grouping that matches
+    the source document's visual layout.
+
+    Detection of "body-only sig fragment": _sig_line=True, title
+    empty, body matches sig-shape (By:/Name:/Title:/Address: prefix
+    OR contains /s/ OR is short uppercase company-style continuation).
+
+    Operation: append the fragment's body (newline-separated) to the
+    preceding sig record's body. Mark the fragment is_envelope=True
+    so the JSONL writer drops it. Parquet still has both rows.
+    """
+    if not rows:
+        return rows
+
+    last_titled_sig: dict[str, Any] | None = None
+    for r in rows:
+        if r.get("is_envelope") or r.get("scope") == "trailer":
+            continue
+        if not r.get("_sig_line"):
+            # Non-sig record — sig-line chain is broken; reset.
+            last_titled_sig = None
+            continue
         title = (r.get("title") or "").strip()
         body = (r.get("body_direct") or "").strip()
-        body_lines = _split_sig_block_body_into_lines(body)
+        if title:
+            # Titled sig record — start a new merge target.
+            last_titled_sig = r
+            continue
+        # Body-only sig fragment. Merge into preceding titled sig record
+        # if any, else become the new merge target.
+        if last_titled_sig is None or not body:
+            last_titled_sig = r if not last_titled_sig else last_titled_sig
+            continue
+        # Merge body into last_titled_sig's body, separated by newline.
+        existing_body = (last_titled_sig.get("body_direct") or "").strip()
+        merged = body if not existing_body else f"{existing_body}\n{body}"
+        last_titled_sig["body_direct"] = merged
+        last_titled_sig["body_direct_chars"] = len(merged)
+        # Drop the fragment from JSONL (kept in parquet for audit).
+        r["is_envelope"] = True
 
-        if len(body_lines) >= 2:
-            # Consolidated party-block. Title stays as its own L2
-            # record (party label, /s/ line, or name); body lines
-            # each become their own L2 record. Fragments take the
-            # next sequential sig_order so they stay grouped with
-            # their parent.
-            r["body_direct"] = ""
-            r["body_direct_chars"] = 0
-            r["depth"] = l2_depth
-            new_rows.append(r)
-            for line in body_lines:
-                frag = _make_fragment(r, "", line, "body")
-                frag["_sig_order"] = _next_sig_order()
-                new_rows.append(frag)
-        elif len(body_lines) == 1:
-            # Single-line body — split as a separate L2 record so the
-            # title and the body are distinct sig-page lines (e.g.
-            # title="Vaidehi Shah", body="Address:").
-            body_line = body_lines[0]
-            r["body_direct"] = ""
-            r["body_direct_chars"] = 0
-            r["depth"] = l2_depth
-            new_rows.append(r)
-            frag = _make_fragment(r, "", body_line, "body")
-            frag["_sig_order"] = _next_sig_order()
-            new_rows.append(frag)
+    return rows
+
+
+def _anchor_subdoc_bodies_after_titles(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Move synthetic subdoc body records to sit right after their parent title.
+
+    Subdoc body records (created by `_consolidate_real_subdocs` with the
+    `_subdoc_body_of` flag) carry the consolidated body content for a
+    real subdoc. After `_sort_records_by_source_position`, their
+    source-text probe can mis-locate them when the body's first words
+    happen to occur EARLIER in the source (e.g. an exhibit body whose
+    first words also appear on the cover page — the forward-progress
+    search will choose the earlier occurrence).
+
+    This pass walks the sorted rows, finds each subdoc body record,
+    and re-inserts it IMMEDIATELY AFTER the row that matches its
+    `_subdoc_body_of` node_id. This preserves the structural ordering:
+    subdoc title at L1, followed by its body record at L2.
+    """
+    body_records: dict[int, dict[str, Any]] = {}
+    other_records: list[dict[str, Any]] = []
+    for r in rows:
+        of_id = r.get("_subdoc_body_of")
+        if of_id is not None and not r.get("is_envelope"):
+            body_records[of_id] = r
         else:
-            # No body — just set depth.
-            r["depth"] = l2_depth
-            new_rows.append(r)
-
-    return new_rows
+            other_records.append(r)
+    if not body_records:
+        return rows
+    out: list[dict[str, Any]] = []
+    for r in other_records:
+        out.append(r)
+        body = body_records.get(r["node_id"])
+        if body is not None:
+            out.append(body)
+    return out
 
 
 def _consolidate_sig_lines_after_iww(
@@ -2520,12 +3332,11 @@ def _consolidate_sig_lines_after_iww(
     if not sig_records:
         return rows
 
-    # Sort sig records by `_sig_order`, the emission-order tag set
-    # during explosion. This keeps parent + fragments adjacent (e.g.
-    # the ULURU Inc. record followed by its By/Name/Title fragments,
-    # then INDEMNITEE followed by its /s//name/Address fragments)
-    # rather than interleaving the two parties' lines.
-    sig_records.sort(key=lambda r: (r.get("_sig_order", 0), r["node_id"]))
+    # Sort sig records by node_id, which matches doc2dict's HTML-walk
+    # order and (for sig pages) the visual top-to-bottom order. After
+    # this sort, body-only fragments follow their preceding titled
+    # record so the merge pass can consolidate per-party blocks.
+    sig_records.sort(key=lambda r: r["node_id"])
 
     # Find the IWW record in non_sig_records. The IWW is the L1 record
     # whose span begins with "IN WITNESS WHEREOF".
@@ -2590,6 +3401,16 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
     sections = walk_sections(document_tree, depth=0)
     sections = _fix_post_signature_envelope(sections)
     sections = _apply_scope_rule(sections)
+    # Collapse each real subdoc (named exhibit/schedule/appendix/annex
+    # with descriptive title or descriptive first-child) into ONE L1
+    # record with its descendants consolidated into the subdoc body.
+    # Per task_rules/scope_rule.md, real subdocs are agreement content;
+    # but doc2dict often fragments their descendants into deep nested
+    # predicted-header records, which inflates depth past the rubric
+    # intent AND trips freeze.py's boilerplate-pattern detector. The
+    # consolidated record is the canonical "subdoc header + body" shape
+    # the rubric describes.
+    sections = _consolidate_real_subdocs(sections)
     sections = _merge_bare_section_marker_with_child(sections)
     # After the merge step, fix doc2dict's HTML-walker mis-parenting:
     # numbered "13. Definitions" sometimes lands as a SIBLING of its own
@@ -2598,7 +3419,18 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
     # depths reflect the actual legal hierarchy.
     sections = _reparent_lettered_subsections_to_numbered_siblings(sections)
     sections = _split_l0_title_from_preamble(sections)
+    # Cover-preamble rescue: when the L0 title appears TWICE in the
+    # source (once on the cover page, once at the agreement start), the
+    # BY AND BETWEEN / parties / date block on the cover is the cover-
+    # preamble. Emit it as one L1 record after the L0 title. Per
+    # Arthur's annotation for idx=1 (Defect 1).
+    sections = _rescue_cover_preamble_block(sections)
     sections = _split_inline_section_markers(sections)
+    # Numbered subsections "N.M" buried in Article bodies (e.g.
+    # "1.1 ... 1.2 ... 1.3 ..." inside ARTICLE 1's body) get split out
+    # as L2 records. This handles license/credit-agreement style where
+    # every definition is inline rather than its own HTML element.
+    sections = _split_inline_nm_section_markers(sections)
     # After splitting out inlined "N." sections from body_direct, scan
     # for foreign lettered "(L)" markers that doc2dict's tail-attribution
     # pathology left in the body. Split them out and re-attach to the
@@ -2622,12 +3454,29 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
     #     "[Signature Page Follows]") is dropped.
     sections = _explode_signature_block_lines(sections)
     sections = _sort_records_by_source_position(sections, idx)
+    # Anchor synthetic subdoc body records to sit right after their
+    # parent subdoc title (Defect 4). The position sorter may
+    # mis-locate them if the body's first words also appear elsewhere
+    # in the source.
+    sections = _anchor_subdoc_bodies_after_titles(sections)
     # Anchor sig-line records to the IWW position. The position sorter
     # uses source-text matching, which mis-locates short sig-line
     # strings like a party-name label that also occurs inside another
     # clause's body. Structural anchor: the sig block is one contiguous
     # cluster immediately after the IWW operating clause.
     sections = _consolidate_sig_lines_after_iww(sections)
+    # Merge body-only sig fragments into the preceding titled sig
+    # record. Runs after the cluster so "preceding in document order"
+    # is the sorted position. This converts per-line doc2dict
+    # fragments into per-party L2 records that match the source's
+    # visual party-block grouping.
+    sections = _merge_body_only_sig_fragments_in_order(sections)
+    # Drop records whose post-sort position precedes the L0 title. The
+    # title-as-root rule (level_rubric.md) says no clause can be part of
+    # the agreement if it appears before the agreement title in source
+    # order. Catches TOC entries that doc2dict promoted out-of-tree and
+    # any other pre-title cover content the node-id heuristic missed.
+    sections = _drop_pre_title_position_records(sections)
 
     base["parse_status"] = "ok"
     base["n_section_nodes"] = len(sections)

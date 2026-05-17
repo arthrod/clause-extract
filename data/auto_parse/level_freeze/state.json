@@ -38,6 +38,13 @@
       "action": "freeze",
       "idx": 0,
       "n_records": 79
+    },
+    {
+      "ts": "2026-05-17T04:55:00",
+      "action": "freeze",
+      "idx": 0,
+      "n_records": 75,
+      "note": "sig-page rule revised: preserve doc2dict natural grouping at depth 2 (no per-line explosion). Company side as one L2 block (per worked example); per-line records 71-74 retire. Subdoc structure also rewritten in same parser commit but only idx=0 impact is sig page."
     }
   ]
 }

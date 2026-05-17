@@ -2314,6 +2314,175 @@ def _load_sot_span_clean(idx: int) -> str | None:
     return None
 
 
+# Section/structural-header patterns that DISQUALIFY a record from being
+# treated as a title-continuation line. A line with any of these patterns
+# is part of the body, not the title.
+_TITLE_CONTINUATION_DISQUALIFIERS = re.compile(
+    r"^\s*(?:"
+    r"ARTICLE\s+\w+"               # "ARTICLE I", "Article 1"
+    r"|SECTION\s+\d"               # "SECTION 1", "Section 2"
+    r"|EXHIBIT\s+[A-Z0-9]"         # "EXHIBIT A", "EXHIBIT 10.25"
+    r"|SCHEDULE\s+[A-Z0-9]"        # "SCHEDULE 1"
+    r"|APPENDIX\s+[A-Z0-9]"        # "APPENDIX A"
+    r"|ANNEX\s+[A-Z0-9]"           # "ANNEX I"
+    r"|WITNESSETH"                 # "WITNESSETH THAT:"
+    r"|WHEREAS"                    # recitals
+    r"|RECITALS"
+    r"|NOW,?\s+THEREFORE"          # "NOW, THEREFORE"
+    r"|IN\s+WITNESS\s+WHEREOF"     # signature operating clause
+    r"|\d+\.\s"                    # numbered sections "1. ..."
+    r"|\([a-zA-Z0-9]+\)"           # lettered/roman markers "(a)", "(i)"
+    r"|\[[^\]]*\]"                 # placeholder "[***]"
+    r"|/s/"                        # signature line
+    r"|By:\s|Name:\s|Title:\s|Date:\s"  # signature labels
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_title_continuation(title: str) -> bool:
+    """Return True if `title` looks like an upper-line of a multi-line
+    agreement title (not a section heading, not a body fragment).
+
+    A title-continuation line:
+      - Has alphabetic content (at least one word of 2+ letters).
+      - Is predominantly uppercase letters (≥ 60% of alphabetic chars
+        are uppercase) — agreement titles are typeset in ALL CAPS.
+      - Doesn't match any structural-header / section / recital /
+        signature pattern.
+      - Doesn't end with a sentence-terminator (`.`, `:`, `;`, `?`, `!`)
+        — agreement titles usually break mid-phrase across lines, often
+        ending with conjunctions ("AND", "OF") or nouns.
+    """
+    if not title:
+        return False
+    stripped = title.strip()
+    if not stripped:
+        return False
+    # Must not match any structural / section / recital / signature pattern.
+    if _TITLE_CONTINUATION_DISQUALIFIERS.match(stripped):
+        return False
+    # Must have at least one alphabetic word of 2+ letters.
+    if not re.search(r"[A-Za-z]{2,}", stripped):
+        return False
+    # Compute uppercase-ratio of alphabetic chars (>= 60% uppercase).
+    alpha = [c for c in stripped if c.isalpha()]
+    if not alpha:
+        return False
+    upper_ratio = sum(1 for c in alpha if c.isupper()) / len(alpha)
+    if upper_ratio < 0.60:
+        return False
+    # Must not end with a sentence-terminating punctuation. Title lines
+    # are noun-phrases that wrap visually; bodies end with periods.
+    if stripped.endswith(('.', ':', ';', '?', '!')):
+        return False
+    return True
+
+
+def _merge_multiline_l0_title(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge a multi-line agreement title into the single L0 record.
+
+    Some EX-10 filings typeset the agreement title across two or more
+    visual lines, e.g.:
+
+        AMENDMENT NO.1 TO CRUDE TALL OIL AND
+        BLACK LIQUOR SOAP SKIMMINGS AGREEMENT
+
+    doc2dict's HTML walker turns each line into its own predicted-header
+    section, both as siblings under the SEC `<DOCUMENT>` envelope. The
+    last line carries the AGREEMENT/PLAN keyword and gets remapped to
+    depth=0 (the L0 title). The preceding line(s) are stranded as
+    siblings at depth=1 — but they are PART of the title, not a
+    standalone L1 clause.
+
+    This post-processor:
+      1. Finds the L0 record (depth=0, not envelope, scope=agreement).
+      2. Walks preceding siblings (same parent_node_id, smaller
+         node_id, no other sibling between them) in document order.
+      3. Collects consecutive preceding siblings that match the
+         shape of a title-continuation line — uppercase, no body,
+         no structural-header pattern, no sentence-terminator.
+      4. Prepends each continuation title to the L0 title (preserving
+         source order) and marks the preceding records as envelope so
+         they drop from JSONL but stay in parquet for audit.
+
+    Runs BEFORE `_split_l0_title_from_preamble` so the L0 title is
+    complete before the preamble split.
+
+    Shape-based detection — no phrase blocklists. The disqualifier
+    regex blocks structural patterns (ARTICLE, SECTION, EXHIBIT,
+    WHEREAS, etc.) so legitimate body lines that follow the title
+    aren't absorbed.
+    """
+    l0: dict[str, Any] | None = None
+    for r in rows:
+        if (
+            r.get("depth") == 0
+            and not r.get("is_envelope")
+            and r.get("scope") == "agreement"
+        ):
+            l0 = r
+            break
+    if l0 is None:
+        return rows
+
+    l0_node_id = l0["node_id"]
+    l0_parent_id = l0.get("parent_node_id")
+    if l0_parent_id is None:
+        return rows
+
+    # Find preceding siblings — same parent, smaller node_id — in
+    # node_id order (which is doc2dict's source order).
+    siblings = sorted(
+        (r for r in rows if r.get("parent_node_id") == l0_parent_id),
+        key=lambda r: r["node_id"],
+    )
+    # Identify the L0's index among siblings.
+    try:
+        l0_pos = next(i for i, s in enumerate(siblings) if s["node_id"] == l0_node_id)
+    except StopIteration:
+        return rows
+    if l0_pos == 0:
+        return rows  # L0 is the first sibling — no continuation lines.
+
+    # Walk preceding siblings from L0 backwards. Collect a contiguous
+    # run of title-continuation candidates ending immediately before L0.
+    continuation: list[dict[str, Any]] = []
+    for i in range(l0_pos - 1, -1, -1):
+        sib = siblings[i]
+        if sib.get("is_envelope") or sib.get("scope") == "trailer":
+            # Hit an envelope (SEC wrapper) or already-dropped record.
+            # Stop the walk — anything earlier than this is filing chrome,
+            # not title.
+            break
+        if (sib.get("cls") or "") != "predicted header":
+            break
+        if (sib.get("body_direct") or "").strip():
+            break
+        title = (sib.get("title") or "").strip()
+        if not _looks_like_title_continuation(title):
+            break
+        continuation.append(sib)
+
+    if not continuation:
+        return rows
+
+    # Build combined title in source order: earliest continuation line
+    # first, then L0's existing title.
+    continuation.reverse()  # source order (oldest first)
+    continuation_titles = [(c.get("title") or "").strip() for c in continuation]
+    existing_l0_title = (l0.get("title") or "").strip()
+    combined = "\n".join(continuation_titles + [existing_l0_title])
+    l0["title"] = combined
+
+    # Mark the continuation records as envelope so they don't double-emit
+    # to JSONL; parquet still records them.
+    for c in continuation:
+        c["is_envelope"] = True
+
+    return rows
+
+
 def _split_l0_title_from_preamble(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Split the L0 (agreement title) record from its preamble body.
 
@@ -3083,6 +3252,94 @@ def _drop_pre_title_cover_records(rows: list[dict[str, Any]]) -> list[dict[str, 
         # Mark as envelope so JSONL drops it; parquet still records the
         # row via all_section_records.
         r["is_envelope"] = True
+    return rows
+
+
+def _strip_page_footer_exhibit_titles(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Strip bare 'Exhibit N.M' titles from non-envelope, non-subdoc
+    exhibit-class records that carry substantive body content.
+
+    Some EX-10 filings stamp the exhibit number on every page as a
+    visual header (`Exhibit 10.7` repeated at the top of each page).
+    doc2dict's HTML walker promotes each repeating page-header tag
+    into its own `cls=exhibit` section. The FIRST one is the legitimate
+    SEC envelope (already flagged `is_envelope=True`); subsequent ones
+    are spurious — they carry substantive body text from the page they
+    head, but their title is just the bare exhibit identifier.
+
+    When that bare-identifier title flows into the source-position
+    sorter (``_sort_records_by_source_position``) as the highest-
+    priority probe, it matches the FIRST occurrence of "Exhibit 10.7"
+    in the source, dragging the record to the document start. The
+    title-as-root rule then drops it as pre-title content — losing
+    the substantive body forever.
+
+    The structural fix: clear the title on these records so the sorter
+    falls back to the body probe (which IS unique to the page's
+    content). The body emits as its own L1 record at the correct
+    source position.
+
+    Detection (purely structural):
+      - cls is in `_SUBDOC_CLASSES` (exhibit/schedule/appendix/annex).
+      - is_envelope is False (not the SEC wrapper).
+      - scope is "agreement" (not already a trailer).
+      - title matches the bare-identifier pattern
+        (`^EXHIBIT|SCHEDULE|APPENDIX|ANNEX <id>$` with no descriptive
+        text after a separator).
+      - body_direct has substantive content (non-empty after strip).
+      - Record is NOT a real subdoc (per ``_is_real_subdoc_title``).
+
+    Runs AFTER ``_consolidate_real_subdocs`` so real subdoc headers
+    keep their identifiers, and BEFORE the position sorter so the
+    title-strip takes effect on sorting.
+    """
+    if not rows:
+        return rows
+
+    # Build children index for the real-subdoc test.
+    children_of: dict[int | None, list[dict[str, Any]]] = {}
+    for r in rows:
+        children_of.setdefault(r.get("parent_node_id"), []).append(r)
+    for pid in children_of:
+        children_of[pid].sort(key=lambda r: r["node_id"])
+
+    for r in rows:
+        cls = (r.get("cls") or "")
+        if cls not in _SUBDOC_CLASSES:
+            continue
+        if r.get("is_envelope"):
+            continue
+        if r.get("scope") == "trailer":
+            continue
+        title = (r.get("title") or "").strip()
+        body = (r.get("body_direct") or "").strip()
+        if not title or not body:
+            continue
+        # Bare-identifier title (no descriptive separator).
+        if not _BARE_SUBDOC_ID_RE.match(title):
+            continue
+        # Body must be SUBSTANTIVE — not just page chrome (whitespace,
+        # short page-reference like "Ex. B-98"). Use 60-char threshold:
+        # genuine content is paragraph-shaped, page chrome is short.
+        # This protects records like idx=5's "Schedule 1.1" + " \n \nEx.
+        # B-98" body from being stripped (the body is page footer, not
+        # substantive content from the page).
+        if len(body) < 60:
+            continue
+        # Confirm not a real subdoc — check the descriptive-child rescue
+        # would not apply. A real subdoc with a descriptive child gets
+        # its title combined in `_consolidate_real_subdocs`; if it still
+        # has a bare identifier here, the rescue did not fire, so it's
+        # safe to treat as a page-footer artifact.
+        kids = children_of.get(r["node_id"], [])
+        first_child_title = kids[0].get("title") if kids else None
+        if _is_real_subdoc_title(
+            r.get("title"), r.get("cls"), r.get("is_envelope", False), first_child_title
+        ):
+            continue
+        # Strip the title; the sorter will fall back to the body probe.
+        r["title"] = ""
+
     return rows
 
 
@@ -4082,6 +4339,15 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
     # follow a numbered sibling into that numbered section so the tree
     # depths reflect the actual legal hierarchy.
     sections = _reparent_lettered_subsections_to_numbered_siblings(sections)
+    # Merge multi-line agreement titles before splitting the preamble.
+    # When the title is typeset across two visual lines (e.g. "AMENDMENT
+    # NO.1 TO CRUDE TALL OIL AND\nBLACK LIQUOR SOAP SKIMMINGS AGREEMENT"),
+    # doc2dict emits each line as its own predicted-header sibling. Only
+    # the last line carries the AGREEMENT keyword and gets remapped to
+    # depth=0; the upper line(s) sit at depth=1. This pass merges those
+    # upper-line continuations into the L0 title before any downstream
+    # step uses the title for sorting or scope decisions.
+    sections = _merge_multiline_l0_title(sections)
     sections = _split_l0_title_from_preamble(sections)
     # Cover-preamble rescue: when the L0 title appears TWICE in the
     # source (once on the cover page, once at the agreement start), the
@@ -4132,6 +4398,15 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
     #   - Signature-page banner chrome ("SIGNATURE PAGE TO FOLLOW",
     #     "[Signature Page Follows]") is dropped.
     sections = _explode_signature_block_lines(sections)
+    # Strip bare "Exhibit N.M" titles from spurious page-header exhibit
+    # records (substantive body, not envelope, not real subdoc). The
+    # bare-identifier title would otherwise become the highest-priority
+    # sort probe and match the FIRST source occurrence (the cover-page
+    # header), dragging the record to the document start where the
+    # title-as-root rule would drop it. Clearing the title makes the
+    # sorter fall back to the body probe, locating the record at its
+    # true source position.
+    sections = _strip_page_footer_exhibit_titles(sections)
     sections = _sort_records_by_source_position(sections, idx)
     # Anchor synthetic subdoc body records to sit right after their
     # parent subdoc title (Defect 4). The position sorter may

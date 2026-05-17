@@ -117,9 +117,43 @@ source-of-truth bs4 extraction itself dropped content), the human
 operator can pass `--force` after explicit review. That's the escape
 hatch; do not use it programmatically.
 
-## Common error: refuses to overwrite
+## Common failure modes
 
-If `idx_<N>.jsonl` already exists, freeze refuses without `--force`.
-That's intentional — overwriting a freeze should be deliberate. Use
-`--force` only when you've explicitly decided to invalidate the
-existing baseline.
+- **"refuses to overwrite idx_<N>.jsonl"** — a baseline already
+  exists for this idx. Pass `--force` only when you've explicitly
+  decided to invalidate the existing one.
+- **"source JSONL older than 5 minutes"** — the stale-file guard
+  fired. Re-run the parser first; if you genuinely need to freeze
+  an older file (re-bake after `git checkout`), pass `--force`.
+- **"multiple depth-0 records"** — the parser misread the document
+  structure. See
+  [`level_rubric.md`](level_rubric.md) §"Common parser failure modes".
+- **"max depth N > 7"** — captured noise. The fix lives in
+  [`scope_rule.md`](scope_rule.md), not in clamping the depth.
+- **"first record is SEC envelope"** — `is_envelope` detection
+  misfired. Check the parquet to confirm the first `cls=exhibit`
+  per idx has `is_envelope=true` set.
+- **"forbidden monkey-patch construct in parser source"** — you
+  added a phrase blocklist, level cap, or company-named literal.
+  See [`scope_rule.md`](scope_rule.md) §"Forbidden approaches" for
+  the list of patterns the monkey-patch detector rejects.
+- **"reconstruction word coverage X% < 90%"** — concat-of-spans
+  dropped real content. Inspect the missing-word sample, find the
+  source passage they came from, and fix the slicing so those
+  records are captured. Don't `--force` past this without explicit
+  human review.
+
+## See also
+
+- [`regress_command.md`](regress_command.md) — what gets checked
+  against the baseline after freeze.
+- [`advance_command.md`](advance_command.md) — the step that runs
+  after a successful freeze + regress.
+- [`level_rubric.md`](level_rubric.md) — the rubric the freeze
+  validator enforces, including the Terminology and Common parser
+  failure modes sections.
+- [`scope_rule.md`](scope_rule.md) — the structural rule the
+  monkey-patch detector enforces (no phrase blocklists, no level
+  caps).
+- [`../docs/DECISIONS.md`](../docs/DECISIONS.md) §10 — the 90%
+  reconstruction bar.

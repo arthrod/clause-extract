@@ -38,27 +38,43 @@ signature filing trailers). See [`scope_rule.md`](scope_rule.md).
 
 ## Files
 
-- [`level_rubric.md`](level_rubric.md) — depth 0–7 rubric (read
-  `level` as nesting depth), SEC-envelope drop, subdocument depth
-  penalty, and the 90% reconstruction gate.
-- [`scope_rule.md`](scope_rule.md) — structural in-scope/out-of-scope
-  rule for filtering non-agreement metadata using signature-block +
-  real-subdoc detection. NEVER use phrase blocklists.
-- [`turn_prompt.md`](turn_prompt.md) — per-turn ACP prompt template.
-  This is what `scripts/level_loop/prompt.py` emits, with a few
-  `{vars}` filled in at run time.
-- [`freeze_command.md`](freeze_command.md) — freezing one idx as a
-  golden baseline. Documents the rubric / monkey-patch / reconstruction
-  gates (all blocking).
+Rubric / contract:
+
+- [`level_rubric.md`](level_rubric.md) — the depth 0–7 contract.
+  Defines `idx`/`order`/`level`/`span`/`cls`/`is_envelope`/`scope`
+  in the Terminology section, gives the standalone-agreement depth
+  table, the SEC-envelope drop, the +1 subdocument penalty, common
+  parser failure modes, and the 90% reconstruction gate.
+- [`scope_rule.md`](scope_rule.md) — the structural rule for what
+  is "the agreement" vs filing context. Covers pre-title cover
+  wedges, the trailer-types table, signature-block detection,
+  real-subdocument detection, the bare-identifier subdoc rescue,
+  and an end-to-end worked walkthrough.
+
+Worked examples:
+
+- [`examples_main_agreement.md`](examples_main_agreement.md) — the
+  Indemnification Agreement baseline (no subdocs; depths 0–3).
+- [`examples_with_subdocs.md`](examples_with_subdocs.md) — a
+  synthetic agreement with three levels of nested subdocs to show
+  the +1 penalty stacking through depth 7.
+
+Loop commands (run in order each turn):
+
+- [`freeze_command.md`](freeze_command.md) — freeze one idx as a
+  golden baseline. Documents the rubric, monkey-patch, and
+  reconstruction gates (all blocking).
 - [`regress_command.md`](regress_command.md) — regression check
-  across all frozen idxs.
-- [`advance_command.md`](advance_command.md) — bump `current_idx` to
-  the next sample. Refuses to advance if regression fails.
-- [`examples_main_agreement.md`](examples_main_agreement.md) — worked
-  example: an Indemnification Agreement parsed under the rubric.
-- [`examples_with_subdocs.md`](examples_with_subdocs.md) — worked
-  example with attached subdocuments showing the +1 penalty stacking
-  through depth 7.
+  across every frozen idx. Run after each parser edit; advance
+  re-runs it as a gate.
+- [`advance_command.md`](advance_command.md) — bump `current_idx`
+  to the next sample. Refuses to advance if regression fails.
+
+Agent prompt:
+
+- [`turn_prompt.md`](turn_prompt.md) — per-turn ACP prompt template
+  emitted by `scripts/level_loop/prompt.py` with `{vars}` filled in
+  at run time. This is what the agent sees on each turn.
 
 ## JSONL record shape
 

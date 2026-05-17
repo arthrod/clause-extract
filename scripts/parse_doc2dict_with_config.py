@@ -3607,12 +3607,15 @@ def _reclassify_letter_i_to_alphabetical(
     return rows
 
 
-# Signature line: "/s/ Jane Doe", "/s/ Terrance K. Wallberg".
-_SIGN_OFF_RE = re.compile(r"/s/\s+\w+")
+# Signature line: "/s/ Jane Doe", "/s/ Terrance K. Wallberg", "/s/JonathanOlefson".
+# Typesetters sometimes omit the space between the "/s/" marker and the
+# signatory's name. The pattern matches either form (zero or more
+# whitespace between the marker and the first name word).
+_SIGN_OFF_RE = re.compile(r"/s/\s*\w+")
 
 # A "signature anchor" is a record whose TITLE or BODY contains a /s/
 # signature line. Detected by SHAPE only — no party-name matching.
-_SIG_TITLE_ANCHOR_RE = re.compile(r"^\s*/s/\s+\w+")
+_SIG_TITLE_ANCHOR_RE = re.compile(r"^\s*/s/\s*\w+")
 
 # Per-line shape detectors for a signature-page line. Each is a SHAPE
 # match — no specific names, companies, or party labels are encoded.
@@ -4532,7 +4535,13 @@ def _explode_signature_block_lines(
         # doc2dict packed the entire sig-page text into its body (and
         # therefore made /s/ appear inside its span). The IWW clause is
         # always L1 per the title-as-root signature-page rubric.
-        if _is_iww_clause(_span_text(r)):
+        # Mirror the PASS-2 IWW-carrier detection by checking both the
+        # combined span AND the body alone: a record whose title is
+        # page-chrome filler (e.g. "[Remainder of page intentionally
+        # left blank.]") and whose body starts with IWW is still the
+        # IWW operating clause and stays L1.
+        r_body_pass3 = (r.get("body_direct") or "").strip()
+        if _is_iww_clause(_span_text(r)) or _is_iww_clause(r_body_pass3):
             continue
         l2_depth = 2 + (r.get("subdoc_penalty") or 0)
         r["depth"] = l2_depth

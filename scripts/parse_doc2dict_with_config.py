@@ -2400,6 +2400,165 @@ def _looks_like_title_continuation(title: str) -> bool:
     return True
 
 
+# Bare single-word AGREEMENT/PLAN title — matches "AGREEMENT", "PLAN",
+# "Agreement", "Plan" alone with nothing else. Used by
+# `_swap_synthetic_l0_with_real_title` to detect doc2dict synthetic L0s
+# (a body-internal section separator typeset as a centered bold paragraph
+# that doc2dict's HTML walker promoted to L0 because it parents the body
+# clauses). The REAL title carrier sits earlier in document order with a
+# descriptive prefix ("SEPARATION AGREEMENT", "EMPLOYMENT AGREEMENT") and
+# was demoted to L1 by `walk_sections`' no-children guard.
+_BARE_AGREEMENT_PLAN_TITLE_RE = re.compile(
+    r"^\s*(?:AGREEMENT|PLAN)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _swap_synthetic_l0_with_real_title(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Swap a synthetic single-word L0 with the real title carrier earlier
+    in document order.
+
+    Some EX-10 filings typeset the agreement title as a centered bold
+    paragraph at the top (e.g. "SEPARATION AGREEMENT<br/>AND<br/>GENERAL
+    RELEASE OF CLAIMS"). Later, a body-internal section separator —
+    another centered bold paragraph containing just the word "AGREEMENT"
+    — sits between the RECITALS and the numbered sections. doc2dict's
+    HTML walker promotes that separator to be the parent of every
+    numbered body clause, and `walk_sections` then assigns it depth=0
+    because (a) its title "AGREEMENT" matches the AGREEMENT|PLAN root
+    pattern and (b) it has direct children.
+
+    Meanwhile, the real title-line records ("SEPARATION AGREEMENT" /
+    "AND" / "GENERAL RELEASE OF CLAIMS") sit earlier as siblings with no
+    children — they get demoted to depth=1 by the no-children guard in
+    `walk_sections`. The third record carries the preamble paragraph as
+    body_direct.
+
+    The structural fingerprint of this pathology:
+      1. The current L0 title is BARE: matches exactly "AGREEMENT" or
+         "PLAN" with nothing else.
+      2. The current L0 has NO body_direct.
+      3. There is an EARLIER record (smaller node_id) whose title matches
+         the AGREEMENT|PLAN end pattern AND has descriptive prefix words
+         (i.e. title is longer than just the bare word).
+      4. That earlier record is in agreement scope (not envelope, not
+         trailer).
+
+    Fix: swap depths. The earlier substantive-title record becomes
+    depth=0 (the real L0); the synthetic separator becomes depth=1 (a
+    regular body record carrying the source word "AGREEMENT" / "PLAN").
+
+    Runs BEFORE `_merge_multiline_l0_title` so the continuation walk
+    finds the correct L0 to expand. Runs BEFORE
+    `_split_l0_title_from_preamble` so the preamble body on the new L0
+    gets split out into its own L1 record.
+
+    No phrase matching — the detection is purely structural (depth,
+    body presence, title shape).
+    """
+    if not rows:
+        return rows
+
+    # Find the current L0.
+    l0: dict[str, Any] | None = None
+    for r in rows:
+        if (
+            r.get("depth") == 0
+            and not r.get("is_envelope")
+            and r.get("scope") == "agreement"
+        ):
+            l0 = r
+            break
+    if l0 is None:
+        return rows
+
+    # Step 1: L0 title must be a BARE single-word AGREEMENT or PLAN.
+    # That's the structural fingerprint of doc2dict's synthetic section
+    # separator promoted to L0. Real agreement titles are longer than
+    # just the bare word ("CREDIT AGREEMENT", "INDEMNIFICATION
+    # AGREEMENT", etc.). A bare "AGREEMENT"/"PLAN" L0 always indicates
+    # that the actual title is elsewhere (typically earlier in the
+    # source as a multi-line centered-bold paragraph).
+    l0_title = (l0.get("title") or "").strip()
+    if not _BARE_AGREEMENT_PLAN_TITLE_RE.match(l0_title):
+        return rows
+    # Body presence is NOT a disqualifier: doc2dict's residual text-leaf
+    # body for the synthetic separator often contains the numbered
+    # sections' text. The body gets split out by
+    # `_split_l0_title_from_preamble` after the swap, into a regular
+    # L1 record.
+
+    l0_node_id = l0["node_id"]
+    l0_penalty = l0.get("subdoc_penalty") or 0
+
+    # Step 2: find an earlier record whose title matches AGREEMENT|PLAN
+    # pattern with descriptive prefix (not bare single-word).
+    # `_STRUCTURAL_LEVELS` puts AGREEMENT|PLAN at level 0, so we use the
+    # same pattern for consistency. We pick the LAST (closest to the
+    # current L0) such record — for a multi-line title typeset as
+    # "SEPARATION AGREEMENT / AND / GENERAL RELEASE OF CLAIMS", only
+    # the FIRST line "SEPARATION AGREEMENT" ends in AGREEMENT, so that
+    # becomes the new L0. The other lines ("AND", "GENERAL RELEASE OF
+    # CLAIMS") get absorbed by `_merge_multiline_l0_title`'s forward
+    # walk (which is enabled by the `_swapped_l0` marker below).
+    _AGREEMENT_END_RE = re.compile(
+        r"^.*\b(AGREEMENT|PLAN)\s*$",
+        re.IGNORECASE,
+    )
+
+    real_title: dict[str, Any] | None = None
+    for r in rows:
+        if r["node_id"] >= l0_node_id:
+            break
+        if r.get("is_envelope") or r.get("scope") == "trailer":
+            continue
+        # Subdoc-penalty must match — we're looking for a sibling-equivalent
+        # title carrier in the same scope context (not buried inside a
+        # subdoc).
+        if (r.get("subdoc_penalty") or 0) != l0_penalty:
+            continue
+        title = (r.get("title") or "").strip()
+        if not title:
+            continue
+        # Must have descriptive prefix (longer than just "AGREEMENT"/"PLAN").
+        if _BARE_AGREEMENT_PLAN_TITLE_RE.match(title):
+            continue
+        # Must match the AGREEMENT|PLAN end pattern.
+        if not _AGREEMENT_END_RE.match(title):
+            continue
+        real_title = r
+        # Don't break — pick the LAST (closest to current L0) such record.
+
+    if real_title is None:
+        return rows
+
+    # Step 3: swap depths.
+    # Promote real_title to L0; demote synthetic L0 to L1.
+    real_title["depth"] = 0 + l0_penalty
+    # Marker for `_merge_multiline_l0_title` to enable its FORWARD walk.
+    # Only the swap pathology requires a forward walk to collect
+    # title continuation lines AFTER the new L0; standard documents
+    # have all continuation lines BEFORE the L0 (the doc2dict-detected
+    # last-line). Without this marker the forward walk would
+    # over-absorb cover-preamble lines into the L0 title.
+    real_title["_swapped_l0"] = True
+
+    # The synthetic L0 becomes L1 — it's a body-internal "AGREEMENT"
+    # separator that should still emit as source content.
+    l0["depth"] = 1 + l0_penalty
+    # Marker for `_explode_signature_block_lines` so the bare
+    # AGREEMENT/PLAN separator isn't claimed as a sig-block ancestor
+    # label by the UP-walk from /s/ carriers. Without this, the
+    # `_SIG_BLOCK_LABEL_RE` match against "AGREEMENT" (short uppercase
+    # title, empty body after the preamble split) would demote the
+    # separator to L2 in the signature area.
+    l0["_synthetic_l0_separator"] = True
+
+    return rows
+
+
 def _merge_multiline_l0_title(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Merge a multi-line agreement title into the single L0 record.
 
@@ -2463,11 +2622,11 @@ def _merge_multiline_l0_title(rows: list[dict[str, Any]]) -> list[dict[str, Any]
         l0_pos = next(i for i, s in enumerate(siblings) if s["node_id"] == l0_node_id)
     except StopIteration:
         return rows
-    if l0_pos == 0:
-        return rows  # L0 is the first sibling — no continuation lines.
 
     # Walk preceding siblings from L0 backwards. Collect a contiguous
     # run of title-continuation candidates ending immediately before L0.
+    # When L0 is the FIRST sibling (l0_pos==0), no preceding lines exist,
+    # but the forward walk below may still pick up trailing title lines.
     continuation: list[dict[str, Any]] = []
     for i in range(l0_pos - 1, -1, -1):
         sib = siblings[i]
@@ -2485,20 +2644,84 @@ def _merge_multiline_l0_title(rows: list[dict[str, Any]]) -> list[dict[str, Any]
             break
         continuation.append(sib)
 
-    if not continuation:
+    # Walk forward from L0 to collect continuation lines that follow the
+    # L0 title's first line. This is ONLY enabled when L0 was promoted
+    # by `_swap_synthetic_l0_with_real_title` (marked `_swapped_l0`).
+    # In that scenario, the L0 record is the FIRST line of a multi-line
+    # title; the trailing lines sit AFTER it as siblings. For example:
+    # "SEPARATION AGREEMENT<br/>AND<br/>GENERAL RELEASE OF CLAIMS" —
+    # doc2dict splits into three sibling records; after the swap, the
+    # first ("SEPARATION AGREEMENT") is L0, and the second ("AND") and
+    # third ("GENERAL RELEASE OF CLAIMS") follow. The third may carry
+    # the preamble body as body_direct — that body is preserved by
+    # transferring it to L0 (so the existing
+    # `_split_l0_title_from_preamble` can split it out as the L1
+    # preamble record).
+    #
+    # Without the swap marker, the forward walk would over-absorb
+    # cover-preamble lines ("PANDORA MEDIA, INC.,", "and") that are
+    # NOT part of the title — they're cover-block content handled by
+    # `_rescue_cover_preamble_block` / `_rescue_post_title_cover_block`.
+    forward_continuation: list[dict[str, Any]] = []
+    preamble_carrier: dict[str, Any] | None = None
+    if l0.get("_swapped_l0"):
+        for i in range(l0_pos + 1, len(siblings)):
+            sib = siblings[i]
+            if sib.get("is_envelope") or sib.get("scope") == "trailer":
+                break
+            if (sib.get("cls") or "") != "predicted header":
+                break
+            title = (sib.get("title") or "").strip()
+            body = (sib.get("body_direct") or "").strip()
+            # The sibling must look like a title continuation.
+            if not _looks_like_title_continuation(title):
+                break
+            # If this sibling carries body content, it's the FINAL title
+            # line — its body is the preamble that follows the title
+            # visually ("THIS SEPARATION AGREEMENT AND ... is entered
+            # into by ..."). We absorb its title into L0, transfer its
+            # body to L0 (so `_split_l0_title_from_preamble` can lift it
+            # as the L1 preamble), then stop the walk.
+            if body:
+                preamble_carrier = sib
+                forward_continuation.append(sib)
+                break
+            # Also stop the walk if this sibling has its own children
+            # — a title continuation line is always a leaf header.
+            if sib.get("n_direct_section_children", 0) > 0:
+                break
+            forward_continuation.append(sib)
+
+    if not continuation and not forward_continuation:
         return rows
 
     # Build combined title in source order: earliest continuation line
-    # first, then L0's existing title.
+    # first, then L0's existing title, then forward continuations.
     continuation.reverse()  # source order (oldest first)
     continuation_titles = [(c.get("title") or "").strip() for c in continuation]
     existing_l0_title = (l0.get("title") or "").strip()
-    combined = "\n".join(continuation_titles + [existing_l0_title])
+    forward_titles = [(c.get("title") or "").strip() for c in forward_continuation]
+    combined = "\n".join(continuation_titles + [existing_l0_title] + forward_titles)
     l0["title"] = combined
+
+    # If a forward continuation carried the preamble body, transfer it to
+    # L0 so `_split_l0_title_from_preamble` will lift it to L1.
+    if preamble_carrier is not None:
+        carried_body = preamble_carrier.get("body_direct") or ""
+        l0["body_direct"] = carried_body
+        l0["body_direct_chars"] = len(carried_body)
+        # Preserve body_recursive too (used by some downstream probes).
+        if preamble_carrier.get("body_recursive"):
+            l0["body_recursive"] = preamble_carrier["body_recursive"]
+            l0["body_recursive_chars"] = len(l0["body_recursive"])
+        preamble_carrier["body_direct"] = ""
+        preamble_carrier["body_direct_chars"] = 0
 
     # Mark the continuation records as envelope so they don't double-emit
     # to JSONL; parquet still records them.
     for c in continuation:
+        c["is_envelope"] = True
+    for c in forward_continuation:
         c["is_envelope"] = True
 
     return rows
@@ -4450,6 +4673,13 @@ def _explode_signature_block_lines(
                 break
             if _has_section_marker_title(parent):
                 break
+            # A synthetic body-internal AGREEMENT/PLAN separator (demoted
+            # from L0 by `_swap_synthetic_l0_with_real_title`) is NOT a
+            # sig-block party label — it's a content separator that
+            # happens to match the short-uppercase shape. Skip it.
+            if parent.get("_synthetic_l0_separator"):
+                cur = parent.get("parent_node_id")
+                continue
             p_title = (parent.get("title") or "").strip()
             p_body = (parent.get("body_direct") or "").strip()
             # Party-label ancestor: short uppercase title (strict
@@ -4799,6 +5029,16 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
     # follow a numbered sibling into that numbered section so the tree
     # depths reflect the actual legal hierarchy.
     sections = _reparent_lettered_subsections_to_numbered_siblings(sections)
+    # If the current L0 is a body-internal section separator like
+    # "AGREEMENT" (a bare single-word centered bold paragraph that
+    # doc2dict's HTML walker mistakenly promoted to be the parent of the
+    # numbered body clauses), swap it with the earlier title carrier
+    # that ends in AGREEMENT/PLAN with a descriptive prefix
+    # ("SEPARATION AGREEMENT", "EMPLOYMENT AGREEMENT"). The earlier
+    # carrier becomes the real L0; the synthetic separator demotes to
+    # L1. Runs BEFORE the multi-line merge so the continuation walk
+    # operates on the correct L0.
+    sections = _swap_synthetic_l0_with_real_title(sections)
     # Merge multi-line agreement titles before splitting the preamble.
     # When the title is typeset across two visual lines (e.g. "AMENDMENT
     # NO.1 TO CRUDE TALL OIL AND\nBLACK LIQUOR SOAP SKIMMINGS AGREEMENT"),
@@ -4806,7 +5046,10 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
     # the last line carries the AGREEMENT keyword and gets remapped to
     # depth=0; the upper line(s) sit at depth=1. This pass merges those
     # upper-line continuations into the L0 title before any downstream
-    # step uses the title for sorting or scope decisions.
+    # step uses the title for sorting or scope decisions. The merge also
+    # walks FORWARD when the swap pass picked an earlier first-line as
+    # L0, absorbing trailing continuation siblings (and a preamble-
+    # carrying final line) into the L0 title.
     sections = _merge_multiline_l0_title(sections)
     sections = _split_l0_title_from_preamble(sections)
     # Cover-preamble rescue: when the L0 title appears TWICE in the

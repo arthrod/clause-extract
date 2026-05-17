@@ -1,7 +1,8 @@
 {
   "current_idx": 0,
   "frozen": [
-    0
+    0,
+    1
   ],
   "history": [
     {
@@ -40,11 +41,40 @@
       "n_records": 79
     },
     {
-      "ts": "2026-05-17T04:55:00",
+      "ts": "2026-05-17T02:30:35",
+      "action": "freeze",
+      "idx": 1,
+      "n_records": 299
+    },
+    {
+      "ts": "2026-05-17T02:33:07",
+      "action": "freeze",
+      "idx": 1,
+      "n_records": 298
+    },
+    {
+      "ts": "2026-05-17T04:36:21",
+      "action": "freeze",
+      "idx": 1,
+      "n_records": 532
+    },
+    {
+      "ts": "2026-05-17T04:36:35",
       "action": "freeze",
       "idx": 0,
-      "n_records": 75,
-      "note": "sig-page rule revised: preserve doc2dict natural grouping at depth 2 (no per-line explosion). Company side as one L2 block (per worked example); per-line records 71-74 retire. Subdoc structure also rewritten in same parser commit but only idx=0 impact is sig page."
+      "n_records": 75
+    },
+    {
+      "ts": "2026-05-17T04:38:25",
+      "action": "freeze",
+      "idx": 0,
+      "n_records": 75
+    },
+    {
+      "ts": "2026-05-17T04:38:25",
+      "action": "freeze",
+      "idx": 1,
+      "n_records": 532
     }
   ]
 }

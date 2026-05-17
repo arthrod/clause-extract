@@ -474,7 +474,17 @@ is stale and any regress signal you read is a phantom.
      # The canonical jsonl must be NEWER than the parser source —
      # otherwise it reflects a previous parser version and any regress
      # signal will be a phantom.
-     stat -f "%m %N" {data_dir_abs}/parse_doc2dict_with_config_nodes.jsonl scripts/parse_doc2dict_with_config.py src/clause_extract/agreement_config.py | sort
+     python3 -c "
+import os, sys
+files = [
+    '{data_dir_abs}/parse_doc2dict_with_config_nodes.jsonl',
+    'scripts/parse_doc2dict_with_config.py',
+    'src/clause_extract/agreement_config.py',
+]
+pairs = sorted((os.path.getmtime(f), f) for f in files if os.path.exists(f))
+for mtime, f in pairs:
+    print(f, int(mtime))
+"
      # The jsonl line should be LAST (largest mtime). If a source file
      # has a newer mtime, you must re-run the parser before continuing.
 

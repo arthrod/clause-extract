@@ -4,7 +4,8 @@
     0,
     1,
     2,
-    3
+    3,
+    4
   ],
   "history": [
     {
@@ -125,6 +126,12 @@
       "action": "freeze",
       "idx": 3,
       "n_records": 102
+    },
+    {
+      "ts": "2026-05-17T06:08:40",
+      "action": "freeze",
+      "idx": 4,
+      "n_records": 77
     }
   ]
 }

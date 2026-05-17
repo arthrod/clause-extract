@@ -3343,6 +3343,73 @@ def _strip_page_footer_exhibit_titles(rows: list[dict[str, Any]]) -> list[dict[s
     return rows
 
 
+def _demote_deeply_nested_body_paragraphs(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Demote deeply-nested all-caps paragraph records to L1.
+
+    doc2dict computes ``depth`` from HTML nesting (``<div>`` → ``<p>`` →
+    ``<font>``…). When the source typesets a body paragraph in bold/all-
+    caps for legal emphasis (statutory disclaimers, no-oral-amendments
+    notices), the HTML wraps it in extra container tags and doc2dict's
+    walker assigns a depth that reflects the markup, not the structural
+    hierarchy.
+
+    The rubric's depth contract is structural (title → top-level body
+    clause → subsection), not HTML-tree. A long all-caps paragraph that
+    is not a section header sits at L1 alongside its numbered/lettered
+    sibling clauses — same depth as a numbered Section.
+
+    Shape detection (no phrase matching):
+      - cls is "predicted header" (doc2dict classified as a header but
+        the title text is paragraph-shaped).
+      - depth ≥ 3 (deeper than parent + 1 for a plain body paragraph).
+      - title is non-empty, has no body, and matches no section marker
+        (numbered/lettered/roman) and no ``_STRUCTURAL_LEVELS`` pattern.
+      - title length > 60 chars (real headings are short; only body
+        paragraphs run this long).
+      - title is entirely uppercase (after stripping whitespace and
+        punctuation) — the structural cue that the source typeset this
+        as a legal-emphasis paragraph, not a normal heading.
+
+    Effect: re-set depth to ``1 + subdoc_penalty`` so the paragraph
+    emits as an L1 sibling of the surrounding sections (or as an L1+
+    descendant inside any enclosing subdocs).
+    """
+    for r in rows:
+        if r.get("is_envelope") or r.get("scope") == "trailer":
+            continue
+        if (r.get("cls") or "") != "predicted header":
+            continue
+        depth = r.get("depth") or 0
+        subdoc_penalty = r.get("subdoc_penalty") or 0
+        if depth < 3 + subdoc_penalty:
+            continue
+        title = (r.get("title") or "").strip()
+        body = (r.get("body_direct") or "").strip()
+        if not title or body:
+            continue
+        if len(title) <= 60:
+            continue
+        # Skip if any section-marker or structural pattern matches.
+        if _infer_level_from_title(title) is not None:
+            continue
+        structural_matched = False
+        for pat, _lvl in _STRUCTURAL_LEVELS:
+            if pat.match(title):
+                structural_matched = True
+                break
+        if structural_matched:
+            continue
+        # All-uppercase shape: every letter character (after the
+        # punctuation pass) is uppercase. Allow numerics and punctuation.
+        letters = [c for c in title if c.isalpha()]
+        if not letters or not all(c.isupper() for c in letters):
+            continue
+        r["depth"] = 1 + subdoc_penalty
+    return rows
+
+
 def _drop_pre_title_position_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drop in-scope records that appear BEFORE the L0 agreement title in
     sorted document-order.
@@ -3802,6 +3869,201 @@ def _split_iww_and_sig_from_body(
             new_rows.append({
                 "node_id": next_id,
                 "parent_node_id": iww_node_id,
+                "depth": l2_depth,
+                "doc2dict_section_key": f"_sig_line_{next_id}",
+                "cls": "promoted text leaf",
+                "title": line,
+                "standardized_title": None,
+                "n_direct_section_children": 0,
+                "body_direct_chars": 0,
+                "body_recursive_chars": len(line),
+                "body_direct": "",
+                "body_recursive": line,
+                "subdoc_penalty": subdoc_penalty,
+                "is_envelope": False,
+                "scope": "agreement",
+                "_sig_line": True,
+            })
+            next_id += 1
+
+    return new_rows
+
+
+def _split_dense_sig_body_no_iww(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Extract a signature-page block from a body when no IWW is present.
+
+    Counterpart to ``_split_iww_and_sig_from_body`` for agreements that
+    use an alternative sig-page operating phrase (e.g. "EXECUTED as of
+    the date first set forth above.") instead of the canonical "IN
+    WITNESS WHEREOF". When doc2dict packs the entire sig page into a
+    record's body and there is no IWW anchor in the document, the
+    upstream IWW split is a no-op and the sig content stays buried as a
+    multi-thousand-char body string.
+
+    Structural detection (shape-only, no phrase matching):
+
+      1. The document has ZERO existing records whose title/body STARTS
+         with the IWW phrase. (When an IWW IS present, ``_split_iww_and_
+         sig_from_body`` handles it.) This function is the IWW-less
+         fallback — it never runs if an IWW anchor exists, so it cannot
+         double-split or compete with the IWW splitter.
+      2. Find a record whose body contains ≥3 ``/s/`` signature marks.
+         The 3-mark threshold filters out bodies that merely quote a
+         sig-mark in passing; a real packed signature page always
+         carries multiple distinct signatures.
+      3. Locate the boundary: the LAST newline before the FIRST sig-shape
+         line in the body. A sig-shape line is any of: a ``/s/`` mark,
+         a "By:/Name:/Title:/Address:" field, a short uppercase label
+         (``_SIG_BLOCK_LABEL_RE``), a corporate-suffix party name
+         (``_CORP_SUFFIX_LABEL_RE``).
+      4. Split:
+           - Text before the boundary stays on the original record as
+             its trimmed body.
+           - Text between the boundary and the start of the sig area —
+             if it carries substantive content (a sentence ending in
+             ``.``) — emits as a new L1 record (the "operating clause
+             stand-in"). This is the agreement's equivalent of the IWW
+             sentence: it sits at L1 and serves as the sig page's
+             header parent.
+           - All sig-shape lines from the boundary onward emit as L2
+             records, one per line, dedup'd to collapse the doc2dict
+             "each block twice" pathology.
+
+    Runs AFTER ``_split_iww_and_sig_from_body`` so the IWW splitter
+    gets first crack at the document. Runs BEFORE ``_explode_signature
+    _block_lines`` so the new sig-line records pick up the standard
+    sig-line marking and depth pinning.
+    """
+    # Guard 1: skip if any record carries IWW as leading text. The IWW
+    # splitter handles those cases; we are strictly the IWW-less
+    # fallback.
+    for r in rows:
+        if r.get("is_envelope") or r.get("scope") == "trailer":
+            continue
+        title = (r.get("title") or "").strip()
+        body = (r.get("body_direct") or "").strip()
+        if _is_iww_clause(title) or _is_iww_clause(body):
+            return rows
+
+    def _is_sig_shape_line(line: str) -> bool:
+        s = line.strip()
+        if not s:
+            return False
+        if _SIGN_OFF_RE.search(s):
+            return True
+        if _SIG_FIELD_RE.match(s):
+            return True
+        # Uppercase label or corporate-suffix party-name shape.
+        if _SIG_BLOCK_LABEL_RE.match(s):
+            return True
+        if _CORP_SUFFIX_LABEL_RE.match(s):
+            return True
+        # Label ending in colon ("BORROWER:", "GUARANTORS:")
+        if re.match(r"^[A-Z][A-Z .,&'\-/]{1,60}:$", s):
+            return True
+        return False
+
+    next_id = max((r["node_id"] for r in rows), default=-1) + 1
+    new_rows: list[dict[str, Any]] = []
+
+    for r in rows:
+        new_rows.append(r)
+        if r.get("is_envelope") or r.get("scope") == "trailer":
+            continue
+        body = r.get("body_direct") or ""
+        if not body:
+            continue
+        # Count /s/ marks — at least 3 distinct sig marks indicates a
+        # real packed sig page, not a passing reference.
+        sig_marks = _SIGN_OFF_RE.findall(body)
+        if len(sig_marks) < 3:
+            continue
+        # Find the first sig-shape line in the body, scanning newlines.
+        lines = body.split("\n")
+        first_sig_line_idx: int | None = None
+        for i, line in enumerate(lines):
+            if _is_sig_shape_line(line):
+                first_sig_line_idx = i
+                break
+        if first_sig_line_idx is None:
+            # /s/ is present but no clean line break before it — bail.
+            continue
+        # The "operating clause stand-in" is the substantive sentence
+        # text BEFORE the first sig-shape line. To recover the operating
+        # sentence cleanly even when doc2dict left fragment lines (like
+        # a single-word remnant "atthew") between the operating period
+        # and the first sig-shape line, we split at the LAST sentence-
+        # ending period in the pre-sig text. Everything after that
+        # period — and the fragment lines too — moves into the sig area.
+        pre_sig_text = "\n".join(lines[:first_sig_line_idx])
+        last_period = pre_sig_text.rfind(".")
+        if last_period >= 0:
+            operating_text = pre_sig_text[: last_period + 1].rstrip()
+            # Fragment text between the operating-clause period and the
+            # first sig-shape line is dropped — typically a single-char
+            # doc2dict drop ("atthew" from "Matthew") that has no
+            # downstream consumer.
+        else:
+            operating_text = ""
+        # The sig-area is the remaining lines.
+        sig_area_lines = lines[first_sig_line_idx:]
+        # Keep nothing on the original body — the sig page was its
+        # entire content. (If the body had a real agreement-clause
+        # prefix it should already be its own record, not packed here.)
+        # Operating-clause-stand-in requirements: substantive content,
+        # ends with a period.
+        op_ok = bool(operating_text) and operating_text.rstrip().endswith(".")
+
+        # Clear the original record's body (the sig content has been
+        # extracted into its own records below).
+        r["body_direct"] = ""
+        r["body_direct_chars"] = 0
+
+        subdoc_penalty = r.get("subdoc_penalty") or 0
+        l1_depth = 1 + subdoc_penalty
+        l2_depth = 2 + subdoc_penalty
+
+        op_node_id: int | None = None
+        if op_ok:
+            # Emit the operating-clause stand-in as a new L1 record.
+            # Parent is the same as the original record's parent so
+            # the source-position sorter can place it correctly.
+            op_record = {
+                "node_id": next_id,
+                "parent_node_id": r.get("parent_node_id"),
+                "depth": l1_depth,
+                "doc2dict_section_key": f"_sigop_{next_id}",
+                "cls": "promoted text leaf",
+                "title": "",
+                "standardized_title": None,
+                "n_direct_section_children": 0,
+                "body_direct_chars": len(operating_text),
+                "body_recursive_chars": len(operating_text),
+                "body_direct": operating_text,
+                "body_recursive": operating_text,
+                "subdoc_penalty": subdoc_penalty,
+                "is_envelope": False,
+                "scope": "agreement",
+            }
+            new_rows.append(op_record)
+            op_node_id = next_id
+            next_id += 1
+
+        # Emit each sig-area line as L2. Use the same per-line cleaner
+        # and dedup logic as the IWW splitter. Parent is the op_record
+        # if we emitted one, else the original record.
+        parent_for_sig_lines = op_node_id if op_node_id is not None else r["node_id"]
+        cleaned = _split_sig_block_body_into_lines("\n".join(sig_area_lines))
+        seen_lines: set[str] = set()
+        for line in cleaned:
+            if line in seen_lines:
+                continue
+            seen_lines.add(line)
+            new_rows.append({
+                "node_id": next_id,
+                "parent_node_id": parent_for_sig_lines,
                 "depth": l2_depth,
                 "doc2dict_section_key": f"_sig_line_{next_id}",
                 "cls": "promoted text leaf",
@@ -4498,6 +4760,26 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
     # and emits IWW as L1 + each sig-page line as L2 — restoring the
     # title-as-root sig-page hierarchy.
     sections = _split_iww_and_sig_from_body(sections)
+    # IWW-less fallback: when the agreement uses an alternative sig-page
+    # operating phrase (e.g. "EXECUTED as of the date first set forth
+    # above.") instead of "IN WITNESS WHEREOF", the IWW splitter above
+    # is a no-op. This pass detects dense sig content (≥3 ``/s/`` marks
+    # in one body) and splits it into an L1 operating-clause stand-in
+    # plus per-line L2 sig records. Same title-as-root sig-page
+    # hierarchy, just keyed off ``/s/`` density and sig-shape lines
+    # instead of the IWW phrase.
+    sections = _split_dense_sig_body_no_iww(sections)
+    # Demote deeply-nested all-caps body paragraphs (legal-emphasis
+    # disclaimers, no-oral-amendments notices) to L1. doc2dict's depth
+    # reflects HTML container nesting, not structural hierarchy; an
+    # all-caps disclaimer wrapped in extra ``<div><p><font>`` for visual
+    # emphasis lands at depth 4+ even though it sits structurally at L1
+    # alongside the surrounding numbered sections. Detection is purely
+    # SHAPE-based: predicted-header class, no section marker, no
+    # structural-level pattern, empty body, long all-caps title. Runs
+    # AFTER the sig-page splitter so any record that started with the
+    # sig page packed into its body has been cleared first.
+    sections = _demote_deeply_nested_body_paragraphs(sections)
     # Explode the signature page per the title-as-root rubric:
     #   - IWW operating clause sits at L1 (signature-page header).
     #   - Each signature-page line (party label, /s/, name, title,

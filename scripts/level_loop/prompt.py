@@ -498,16 +498,25 @@ is stale and any regress signal you read is a phantom.
        envelope as first record, no SEC-filing boilerplate captured.
 
    (b) **Reconstruction**: concat-of-spans must approximate the
-       source-of-truth. Run:
+       source-of-truth. Word coverage < 90% is a HARD FAIL —
+       the freeze gate enforces this automatically. To preview
+       the check before freezing, run:
 
-         uv run scripts/measure_reconstruction.py --idx {current_idx}
+         uv run scripts/level_loop/regress.py
 
-       Read the word coverage and char ratio. Word coverage < 90%
-       is a HARD FAIL at freeze time — the freeze gate refuses
-       below the bar. If you're below 90%, the parser dropped real
-       content; find the missing words in the source, locate the
-       record(s) that should have captured them, and fix the
-       slicing. Then re-run the parser and try again.
+       If regress passes, word coverage is sufficient. If you
+       suspect content was dropped, inspect the output jsonl:
+
+         python3 -c "
+import json, re
+rows=[json.loads(l) for l in open('{data_dir_abs}/parse_doc2dict_with_config_nodes.jsonl') if '\"idx\": {current_idx}' in l]
+spans=' '.join(r.get('body_direct','') for r in rows)
+print(len(spans.split()), 'words in reconstruction')
+"
+
+       Find missing words in the source, locate the record(s)
+       that should have captured them, and fix the slicing.
+       Then re-run the parser and try again.
 
 7. If correct, freeze:
 

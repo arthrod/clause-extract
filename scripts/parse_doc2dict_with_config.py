@@ -1994,9 +1994,9 @@ def _reclassify_letter_i_to_alphabetical(
             if next_kind == "numbered":
                 break
 
-        # Alphabetical context: previous is letter "(h)" AND/OR next is
-        # letter "(j)". We require at least one anchor to be a clean
-        # alphabetical neighbour; both, for a strong signal.
+        # Alphabetical context: require BOTH previous "(h)" AND next "(j)"
+        # as confirmed alphabetical neighbours. A single anchor is too
+        # weak — it can fire across section boundaries by coincidence.
         prev_is_h = (
             prev_marker is not None
             and prev_marker[1] == "lettered"
@@ -2007,7 +2007,7 @@ def _reclassify_letter_i_to_alphabetical(
             and next_marker[1] == "lettered"
             and next_marker[2] == "j"
         )
-        if not (prev_is_h or next_is_j):
+        if not (prev_is_h and next_is_j):
             continue
         # Confirmed alphabetical "(i)". Reparent and re-depth to match
         # the lettered neighbour. Also re-parent any records that were

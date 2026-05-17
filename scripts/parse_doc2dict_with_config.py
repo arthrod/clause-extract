@@ -136,6 +136,23 @@ _LEVEL_PATTERNS: list[tuple[int, re.Pattern[str]]] = [
     (3, re.compile(r"^\((\d+)\)")),
     # Depth 2: single lowercase letter in parens "(a)", "(b)", "(c)"
     (2, re.compile(r"^\(([a-z])\)")),
+    # Depth 3: N.M.K dotted section marker (subsection of an N.M
+    # section). Examples: "2.1.1 Term Loans", "13.6.2 Force Majeure".
+    # The lookahead `(?![.\d])` makes sure we don't match the prefix
+    # of "2.1.1.1" (which would be depth 4). The marker may be glued
+    # to the title text ("2.1.1Term Loans.") or separated by whitespace
+    # ("2.1.1 Term Loans."), so the trailing char is unconstrained.
+    # MUST appear before N.M and N. patterns so the deeper structure
+    # wins. See task_rules/level_rubric.md "Worked depth chain".
+    (3, re.compile(r"^(\d+)\.(\d+)\.(\d+)(?![.\d])")),
+    # Depth 2: N.M dotted section marker (subsection of an Article).
+    # Examples: "2.1 Promise to Pay", "2.1Promise to Pay" (no space),
+    # "1.10 Definitions". Lookahead `(?![.\d])` keeps this from
+    # absorbing the "N.M" prefix of an "N.M.K" marker. MUST appear
+    # before the bare N. pattern so credit/license-style numbered
+    # subsections land at depth 2 under their topic-Article L1
+    # parent. See task_rules/level_rubric.md depth chain.
+    (2, re.compile(r"^(\d+)\.(\d+)(?![.\d])")),
     # Depth 1: bare number with period ("1.", "10.", "21.")
     (1, re.compile(r"^(\d+)\.")),
     # Depth 1: ARTICLE heading ("ARTICLE I", "ARTICLE 3", "Article IV.")
@@ -3509,6 +3526,14 @@ def _explode_signature_block_lines(
     # labels (with empty body or sig-shape body) join the block. Stop
     # at the first ancestor that bears a section marker (numbered or
     # lettered) — that's an agreement clause, not a sig-block parent.
+    #
+    # CRITICAL: never claim the L0 title (depth=0) as a sig-block label,
+    # even if its text shape (short uppercase) happens to match. The
+    # agreement's title is the structural root per the title-as-root
+    # rubric (level_rubric.md "Title is the root of the agreement"); it
+    # cannot be demoted to a sig-line. This guards against agreements
+    # whose title is short and all-caps (e.g. "LOAN AND SECURITY
+    # AGREEMENT") matching _SIG_BLOCK_LABEL_RE by accident.
     for carrier in sig_carriers:
         cur = carrier.get("parent_node_id")
         seen: set[int] = set()
@@ -3520,6 +3545,10 @@ def _explode_signature_block_lines(
             if parent.get("is_envelope") or parent.get("scope") == "trailer":
                 cur = parent.get("parent_node_id")
                 continue
+            # Stop the climb at the L0 agreement title. It is the
+            # structural root and cannot be a sig-block label.
+            if parent.get("depth") == 0:
+                break
             if _has_section_marker_title(parent):
                 break
             p_title = (parent.get("title") or "").strip()
@@ -3602,6 +3631,18 @@ def _explode_signature_block_lines(
         if r.get("is_envelope") or r.get("scope") == "trailer":
             continue
         if r["node_id"] not in sig_line_node_ids:
+            continue
+        # Defensive guard mirroring the up-climb stop condition:
+        # never demote the L0 agreement title to a sig-line depth.
+        if r.get("depth") == 0:
+            continue
+        # The IWW operating clause is L1 (set by PASS 2 above). If a
+        # record's title/body contains the IWW phrase it is the IWW
+        # clause itself; do not let PASS 3 demote it to L2 just because
+        # doc2dict packed the entire sig-page text into its body (and
+        # therefore made /s/ appear inside its span). The IWW clause is
+        # always L1 per the title-as-root signature-page rubric.
+        if _is_iww_clause(_span_text(r)):
             continue
         l2_depth = 2 + (r.get("subdoc_penalty") or 0)
         r["depth"] = l2_depth

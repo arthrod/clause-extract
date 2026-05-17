@@ -3,7 +3,8 @@
   "frozen": [
     0,
     1,
-    2
+    2,
+    3
   ],
   "history": [
     {
@@ -112,6 +113,18 @@
       "action": "freeze",
       "idx": 2,
       "n_records": 422
+    },
+    {
+      "ts": "2026-05-17T05:46:11",
+      "action": "freeze",
+      "idx": 3,
+      "n_records": 102
+    },
+    {
+      "ts": "2026-05-17T05:48:19",
+      "action": "freeze",
+      "idx": 3,
+      "n_records": 102
     }
   ]
 }

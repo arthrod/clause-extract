@@ -4195,11 +4195,20 @@ def _explode_signature_block_lines(
     actives.sort(key=lambda r: r["node_id"])
 
     # Pin the IWW operating clause depth=1.
+    #
+    # We detect IWW in either the combined span (title+body) OR in the
+    # body alone. The body-alone check handles records where doc2dict
+    # placed page-chrome filler text in the title (e.g. "[Remainder of
+    # page intentionally left blank]") and the IWW operating sentence
+    # sits in the body. The combined-span check (`_is_iww_clause(span)`)
+    # only fires when IWW is at the start of the span, so a non-IWW
+    # title prefix would otherwise hide the IWW anchor.
     iww_present = False
     iww_carriers: list[dict[str, Any]] = []
     for r in actives:
         span = _span_text(r)
-        if _is_iww_clause(span):
+        body = (r.get("body_direct") or "").strip()
+        if _is_iww_clause(span) or _is_iww_clause(body):
             r["depth"] = 1 + (r.get("subdoc_penalty") or 0)
             iww_present = True
             iww_carriers.append(r)
@@ -4247,10 +4256,59 @@ def _explode_signature_block_lines(
             return out
 
         # Set of parent_node_ids to consider — every parent that contains
-        # an IWW record as a child.
-        sig_area_parent_ids: set[int | None] = {
-            iww.get("parent_node_id") for iww in iww_carriers
-        }
+        # an IWW record as a child, plus an UP-walk extension when none of
+        # the IWW carrier's immediate siblings are sig-shape (e.g. the IWW
+        # was packed inside an all-caps continuation node that is itself a
+        # sibling of the real sig parties).
+        sig_area_parent_ids: set[int | None] = set()
+        for iww in iww_carriers:
+            cur_pid = iww.get("parent_node_id")
+            iww_seen: set[int | None] = set()
+            walked = 0
+            while cur_pid is not None and cur_pid not in iww_seen and walked < 4:
+                iww_seen.add(cur_pid)
+                parent_rec = by_node_id.get(cur_pid)
+                # Always include this parent as a search base.
+                sig_area_parent_ids.add(cur_pid)
+                # Stop the up-walk at the L0 agreement title or at a
+                # section-marker ancestor (a real agreement clause). The
+                # title-as-root rubric forbids demoting top-level body
+                # clauses to sig-line depth.
+                if parent_rec is None:
+                    break
+                if parent_rec.get("depth") == 0:
+                    break
+                if _has_section_marker_title(parent_rec):
+                    break
+                # If the current parent already has sig-shape siblings of
+                # the IWW carrier visible at this level, stop — no need
+                # to walk further. Sig-shape detection here mirrors the
+                # sibling test below.
+                has_sig_sib = False
+                for sib in children_of_local.get(cur_pid, []):
+                    if sib.get("node_id") == iww.get("node_id"):
+                        continue
+                    if sib.get("is_envelope") or sib.get("scope") == "trailer":
+                        continue
+                    if _has_section_marker_title(sib):
+                        continue
+                    s_body = (sib.get("body_direct") or "").strip()
+                    if _is_iww_clause(_span_text(sib)) or _is_iww_clause(s_body):
+                        continue
+                    s_title = (sib.get("title") or "").strip()
+                    if (
+                        _SIG_FIELD_RE.match(s_title)
+                        or _SIG_FIELD_RE.match(s_body)
+                        or (s_title and _SIG_BLOCK_LABEL_RE.match(s_title))
+                        or (s_title and _CORP_SUFFIX_LABEL_RE.match(s_title))
+                        or (not s_title and s_body and _SIG_FIELD_RE.match(s_body))
+                    ):
+                        has_sig_sib = True
+                        break
+                if has_sig_sib:
+                    break
+                cur_pid = parent_rec.get("parent_node_id")
+                walked += 1
         for parent_id in sig_area_parent_ids:
             siblings = children_of_local.get(parent_id, [])
             for sib in siblings:
@@ -4260,11 +4318,13 @@ def _explode_signature_block_lines(
                     # A numbered/lettered section is agreement content
                     # (a top body clause), not a sig fragment.
                     continue
-                # Skip the IWW record itself — it stays L1.
-                if _is_iww_clause(_span_text(sib)):
+                # Skip the IWW record itself — it stays L1. Detect IWW
+                # in the combined span OR in the body alone (matches the
+                # PASS-2 IWW carrier detection above).
+                sib_body = (sib.get("body_direct") or "").strip()
+                if _is_iww_clause(_span_text(sib)) or _is_iww_clause(sib_body):
                     continue
                 sib_title = (sib.get("title") or "").strip()
-                sib_body = (sib.get("body_direct") or "").strip()
                 looks_sig = (
                     _SIG_FIELD_RE.match(sib_title)
                     or _SIG_FIELD_RE.match(sib_body)
@@ -4282,10 +4342,10 @@ def _explode_signature_block_lines(
                             continue
                         if _has_section_marker_title(d):
                             continue
-                        if _is_iww_clause(_span_text(d)):
+                        d_body = (d.get("body_direct") or "").strip()
+                        if _is_iww_clause(_span_text(d)) or _is_iww_clause(d_body):
                             continue
                         d_title = (d.get("title") or "").strip()
-                        d_body = (d.get("body_direct") or "").strip()
                         d_looks_sig = (
                             _SIG_FIELD_RE.match(d_title)
                             or _SIG_FIELD_RE.match(d_body)
@@ -4307,7 +4367,8 @@ def _explode_signature_block_lines(
                 continue
             if r.get("depth") == 0:
                 continue
-            if _is_iww_clause(_span_text(r)):
+            r_body = (r.get("body_direct") or "").strip()
+            if _is_iww_clause(_span_text(r)) or _is_iww_clause(r_body):
                 continue
             l2_depth = 2 + (r.get("subdoc_penalty") or 0)
             r["depth"] = l2_depth

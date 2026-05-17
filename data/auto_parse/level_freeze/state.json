@@ -10,7 +10,8 @@
     6,
     7,
     8,
-    9
+    9,
+    10
   ],
   "history": [
     {
@@ -185,6 +186,12 @@
       "action": "freeze",
       "idx": 9,
       "n_records": 20
+    },
+    {
+      "ts": "2026-05-17T07:50:23",
+      "action": "freeze",
+      "idx": 10,
+      "n_records": 6
     }
   ]
 }

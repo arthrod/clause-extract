@@ -3298,6 +3298,19 @@ _SIG_FIELD_RE = re.compile(
 # punctuation), not enumeration-driven. No specific labels are encoded.
 _SIG_BLOCK_LABEL_RE = re.compile(r"^[A-Z][A-Z .,&'\-]{1,40}$")
 
+# Corporate party label shape — uppercase-leading proper-noun prefix
+# followed by a corporate entity suffix (Inc., Inc, Corp., Corp, LLC,
+# L.P., LP, Ltd., Ltd, Limited, Co., Co, Company, N.A., S.A., GmbH, AG,
+# PLC). Used as a SHAPE complement to _SIG_BLOCK_LABEL_RE for mixed-case
+# corporate names (e.g. "ULURU Inc.", "Acme Corp.", "Foo Bar LLC") that
+# the strict ALL-CAPS pattern misses. No specific company names are
+# encoded — only the structural suffix shape.
+_CORP_SUFFIX_LABEL_RE = re.compile(
+    r"^[A-Z][A-Za-z0-9 .,&'\-]{0,80}\s+"
+    r"(?:Inc|Corp|LLC|L\.?P|Ltd|Limited|Co|Company|N\.A|S\.A|GmbH|AG|PLC|LLP)"
+    r"\.?$"
+)
+
 # Signature-page banner line — typesetter chrome telling the reader the
 # signature page follows. Examples: "SIGNATURE PAGE TO FOLLOW", "[Signature
 # Page Follows]", "-- Signature Page --". Detected by SHAPE: the word
@@ -3534,6 +3547,13 @@ def _explode_signature_block_lines(
     # cannot be demoted to a sig-line. This guards against agreements
     # whose title is short and all-caps (e.g. "LOAN AND SECURITY
     # AGREEMENT") matching _SIG_BLOCK_LABEL_RE by accident.
+    # Track which records were claimed as sig-block PARENTS during the
+    # UP-climb so PASS 2.5 can expand DOWN from them to catch siblings
+    # of the carrier under the same parent (mixed-case corporate party
+    # labels often parent a /s/ carrier plus separate "By"/"Name:"/
+    # "Title:" sibling fragments).
+    sig_block_parents: set[int] = set()
+
     for carrier in sig_carriers:
         cur = carrier.get("parent_node_id")
         seen: set[int] = set()
@@ -3553,11 +3573,17 @@ def _explode_signature_block_lines(
                 break
             p_title = (parent.get("title") or "").strip()
             p_body = (parent.get("body_direct") or "").strip()
-            # Party-label ancestor: short uppercase title, body empty
-            # OR body is sig-shape continuation content.
+            # Party-label ancestor: short uppercase title (strict
+            # ALL-CAPS shape) OR mixed-case corporate-suffix shape
+            # (e.g. "ULURU Inc.", "Acme Corp."), body empty OR body
+            # is sig-shape continuation content. Both shapes are
+            # structural — no specific names or labels are encoded.
             if (
                 p_title
-                and _SIG_BLOCK_LABEL_RE.match(p_title)
+                and (
+                    _SIG_BLOCK_LABEL_RE.match(p_title)
+                    or _CORP_SUFFIX_LABEL_RE.match(p_title)
+                )
                 and (
                     not p_body
                     or _SIG_FIELD_RE.match(p_body)
@@ -3565,6 +3591,7 @@ def _explode_signature_block_lines(
                 )
             ):
                 sig_line_node_ids.add(parent["node_id"])
+                sig_block_parents.add(parent["node_id"])
                 cur = parent.get("parent_node_id")
                 continue
             # IWW operating clause ancestor — that's L1, not part of
@@ -3596,8 +3623,15 @@ def _explode_signature_block_lines(
                 stack.append(c["node_id"])
         return out
 
-    for carrier in sig_carriers:
-        for d in _walk_descendants(carrier["node_id"]):
+    # Walk DOWN from each /s/ carrier AND from each sig-block parent
+    # identified during the UP-climb. Walking from parents catches
+    # SIBLINGS of the carrier under the same parent (e.g. a separate
+    # "By" fragment that doc2dict split off from the /s/ line into its
+    # own predicted-header node).
+    walk_roots: set[int] = {c["node_id"] for c in sig_carriers}
+    walk_roots.update(sig_block_parents)
+    for root_nid in walk_roots:
+        for d in _walk_descendants(root_nid):
             if d.get("is_envelope") or d.get("scope") == "trailer":
                 continue
             if _has_section_marker_title(d):
@@ -3615,6 +3649,7 @@ def _explode_signature_block_lines(
                 or _SIG_FIELD_RE.match(d_title)
                 or _SIG_FIELD_RE.match(d_body)
                 or (d_title and _SIG_BLOCK_LABEL_RE.match(d_title) and not d_body)
+                or (d_title and _CORP_SUFFIX_LABEL_RE.match(d_title) and not d_body)
                 or (d_title and not d_body)  # bare name as title
                 or (not d_title and d_body and _SIG_FIELD_RE.match(d_body))
             )

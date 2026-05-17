@@ -11,6 +11,43 @@ clause's 0-indexed nesting depth. If concat-of-spans doesn't reproduce
 the source for an idx, the parser is wrong for that idx — regardless of
 how clever its depth assignments look.
 
+## Terminology
+
+This doc and the worked examples use specific names for specific
+fields in the pipeline. They are not synonyms; mixing them up will
+make the rules below hard to follow.
+
+  - **`idx`** — the integer row index in the corpus parquet. One
+    `idx` = one agreement. Every JSONL record carries the `idx` so
+    a downstream consumer can join records back to the source row.
+  - **`level`** (JSONL field name) / **depth** (prose term) — the
+    same thing, used interchangeably here. The 0-indexed nesting
+    depth of a clause within the agreement's structural hierarchy.
+    The JSONL key is `level`; this doc uses "depth" when discussing
+    the concept and "level" when referring to the field.
+  - **`order`** — 0-indexed sequence number of a record *within* its
+    idx, in document order. Independent of `level`. Sorting by
+    `order` ascending reproduces linear reading order regardless of
+    how the tree nests.
+  - **`span`** — heading + body text of one clause, verbatim from
+    the source. Concatenating all spans for one idx in `order`
+    ascending is the reconstruction target.
+  - **`cls`** — the structural class doc2dict assigns to a section
+    before the parser sees it (`title`, `preamble`, `recital`,
+    `section`, `signature`, `exhibit`, `schedule`, `appendix`,
+    `annex`, …). Lives in the parquet, not in the JSONL. The
+    subdoc-detection rule keys off `cls`.
+  - **`is_envelope`** — boolean parquet column marking the SEC
+    `<DOCUMENT>` envelope (the first `cls=exhibit` per idx with an
+    empty body). Envelopes are dropped from the JSONL.
+  - **`scope`** — parquet column indicating whether a section is
+    emitted to the JSONL (`"agreement"`) or held back as filing
+    context (`"trailer"`). See [`scope_rule.md`](scope_rule.md).
+  - **subdocument** / **subdoc** — a real attached subdocument
+    inside the agreement (an Exhibit A form, a Schedule 2 of
+    definitions, an Annex I addendum). Detected structurally;
+    carries the +1 depth penalty for its descendants.
+
 ## Scope: every kind of agreement is in scope
 
 The corpus is SEC EX-10 attachments, but the agreements themselves come
@@ -128,6 +165,34 @@ unilateral designation), the deeper depths may simply not appear —
 that's correct, not a defect. The depths capture structure that exists
 in the source. Don't synthesise depth that isn't there.
 
+## Worked depth chain — ARTICLE / Section / lettered nesting
+
+For an agreement that uses ARTICLE → Section → lettered nesting (a
+common pattern in credit and license agreements), depths are:
+
+  - "CREDIT AGREEMENT" (the title) → depth 0
+  - "ARTICLE I — DEFINITIONS" → depth 1 (direct child of the title)
+  - "Section 1.1 Defined Terms" → depth 2 (direct child of Article I)
+  - "(a) 'Affiliate' means…" → depth 3 (direct child of Section 1.1)
+  - "(i) any Person controlling…" → depth 4 (direct child of (a))
+  - "(A) directly…" → depth 5
+
+An agreement that skips ARTICLE and jumps straight to numbered
+Sections (a typical Indemnification Agreement) has:
+
+  - "INDEMNIFICATION AGREEMENT" (the title) → depth 0
+  - "1. Indemnity of Indemnitee" → depth 1
+  - "(a) Proceedings Other Than…" → depth 2
+  - "(i) by a majority vote…" → depth 3
+
+Both patterns are equally valid. The same lettered "(a)" item ends
+up at depth 2 in one agreement and depth 3 in another because of
+what sits between it and the title — not because of any rule about
+"(a) is always at depth 2". The marker convention (numbered →
+lettered → roman → capital → digit) is a *style* convention writers
+follow; it is not the source of truth for depth. Structural ancestry
+is.
+
 ## SEC envelope drop rule
 
 SEC EDGAR filings wrap each EX-10 agreement in a `<DOCUMENT>` envelope
@@ -169,12 +234,58 @@ subdoc, add +2; for three levels of subdoc nesting, +3 (ceiling 7).
 | context                                     | first body clause | (a) becomes | (i) becomes |
 |---------------------------------------------|-------------------|-------------|-------------|
 | main agreement                              | 1                 | 2           | 3           |
-| inside one subdocument                      | 2                 | 3           | 4           |
+| inside subdocument one                      | 2                 | 3           | 4           |
 | inside subdoc-inside-subdoc                 | 3                 | 4           | 5           |
 | inside subdoc-inside-subdoc-inside-subdoc   | 4                 | 5           | 6           |
+| inside subdocument two                      | 2                 | 3           | 4           |
 
 Three levels of subdoc nesting is the practical ceiling — most filings
 top out at one level. The rubric supports deeper through depth 7.
+
+## Common parser failure modes
+
+The rubric is structural, so failures show up as structural anomalies
+in the JSONL. These are the patterns the validator and manual review
+look for:
+
+  - **Zero depth-0 records for an idx.** The parser failed to
+    identify the title. Often caused by the title being on the same
+    line as the preamble, or an unusual title format the classifier
+    didn't recognise. The right behaviour is to fail loudly, NOT to
+    synthesise a title from the first non-empty line.
+  - **Multiple depth-0 records for an idx.** The parser split one
+    agreement into multiple roots — usually because a filing trailer
+    (press release, "About <Company>" block) was misclassified as a
+    second agreement. The fix lives in
+    [`scope_rule.md`](scope_rule.md), not in clamping depths.
+  - **`level > 7`.** Always a defect. Real EX-10 documents do not
+    nest that deeply; depths above the ceiling almost always
+    indicate captured noise (deeply-nested page-footer artifacts,
+    HTML tree-walks that descended into CSS-positioned divs).
+    `freeze.py` rejects the freeze when this happens.
+  - **Synthesised depth.** Don't pad shallow documents with fake
+    hierarchy. A one-page unilateral release with a title, a single
+    paragraph, and a signature is correctly depth-0 + depth-1 only.
+    Inventing a "Section 1" wrapper to give the paragraph a parent
+    is wrong.
+  - **Depths that don't survive concatenation.** If the spans
+    concatenate to less than 90% of the source word set, the depth
+    assignments are decorative. The reconstruction gate runs after
+    the depth checks and is the final word.
+  - **The SEC envelope appears as a depth-1 record.** Means
+    `is_envelope` detection misfired. The first `cls=exhibit` per
+    idx with an empty body must be flagged and dropped.
+  - **Signature-page content emitted at the wrong depth.** All
+    signature-page content sits at depth 2 (a child of the
+    signature-page operating clause at depth 1), regardless of whether
+    the "IN WITNESS WHEREOF…" line is present in the source. The
+    parser **preserves doc2dict's natural HTML grouping** at depth 2:
+    if doc2dict gives the whole sig page as one node it stays one
+    depth-2 record; if doc2dict fragments per line, each fragment is
+    its own depth-2 record. The parser does not impose its own
+    per-line splitting or per-party merging — document order encodes
+    party grouping. See [`examples_main_agreement.md`](examples_main_agreement.md)
+    for the worked case.
 
 ## What "matches the rubric" means in practice
 

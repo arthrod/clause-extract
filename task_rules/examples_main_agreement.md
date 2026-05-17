@@ -118,22 +118,27 @@ Address:
 - The signature-page **operating clause** ("IN WITNESS WHEREOF, the
   parties hereto have executed this Agreement…") is at **depth 1** —
   it is the signature page's header, a direct child of the agreement.
-- Each signature-page **line** (party name label, `/s/...` line,
-  `By:`/`Name:`/`Title:` block, `INDEMNITEE` role label, `Address:`)
-  is at **depth 2** — a child of the signature-page operating clause.
-  Lines are flat siblings at depth 2; document order tells you which
-  lines belong to which party (a party label precedes its `/s/`,
-  name, title, address).
+- Signature-page **content** sits at **depth 2** — children of the
+  signature-page operating clause. The parser **preserves doc2dict's
+  natural grouping** at depth 2: whatever doc2dict gives as one HTML
+  node stays as one depth-2 record. Do not explode per line and do
+  not merge across parties. So a signature page that doc2dict packs
+  into a single HTML container becomes ONE depth-2 record (e.g. all
+  party labels, `/s/` marks, `By:`/`Name:`/`Title:` fields in one
+  block). A signature page that doc2dict fragments per line becomes
+  several depth-2 records, one per fragment. Document order is what
+  encodes party grouping; the parser does not impose its own grouping.
 - In modern agreements that **lack** the "IN WITNESS WHEREOF…"
-  operating clause, signature-page lines remain at **depth 2**. The
-  conceptual depth-1 parent (the signature page itself) is simply
-  absent in the source; the parser still emits the lines at depth 2
-  to keep the signature-page depth contract consistent across the
-  corpus. This is a theoretical compromise: we hold the depth steady
-  so a downstream classifier can target depth-2 uniformly across
-  documents. It is not a classification exercise here — the parser
-  does not label lines as "signature" vs "notary" vs "witness"; it
-  just preserves them at depth 2.
+  operating clause, signature-page content remains at **depth 2** with
+  the same "preserve doc2dict grouping" rule. The conceptual depth-1
+  parent (the signature page itself) is simply absent in the source;
+  the parser still emits the content at depth 2 to keep the
+  signature-page depth contract consistent across the corpus. This is
+  a theoretical compromise: we hold the depth steady so a downstream
+  classifier can target depth-2 uniformly across documents. It is not
+  a classification exercise here — the parser does not label content
+  as "signature" vs "notary" vs "witness"; it just preserves whatever
+  doc2dict produced at depth 2.
 - **Signature-page footers are out of scope.** Page-bottom artifacts
   inside the signature page — `[Signature Page Follows]`,
   `-- Signature Page --` banners, page numbers, exhibit-reference
@@ -152,7 +157,8 @@ depth 0: 1 record    (the agreement title)
 depth 1: ~20 records (preamble, recitals, top-level Sections 1–21,
                       signature-page operating clause)
 depth 2: ~40 records (lettered subsections (a)/(b)/(c)/(d) and the
-                      signature-page lines — regardless of whether
-                      the operating clause is present)
+                      signature-page content — whatever doc2dict
+                      groups into one node becomes one depth-2 record;
+                      count varies with doc2dict's fragmentation)
 depth 3: ~5 records  (sub-sub items like (i)/(ii))
 ```

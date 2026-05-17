@@ -973,9 +973,20 @@ def _fix_post_signature_envelope(rows: list[dict[str, Any]]) -> list[dict[str, A
 
     doc2dict sometimes strips the EXHIBIT tag from the HTML, so walk_sections
     never detects the real envelope and misidentifies the first post-content
-    annex as the SEC envelope. If an envelope node shares a parent with
-    section/article siblings that appear BEFORE it, the envelope is really a
-    post-agreement attachment.
+    annex as the SEC envelope. Two structural cases mark such a node as
+    "not really the envelope":
+
+      Case A — sibling-based: an envelope node shares a parent with
+      `section`/`article` siblings that appear BEFORE it in node_id order.
+      The envelope is then post-agreement attachment.
+
+      Case B — ancestor-based: the envelope node is a structural DESCENDANT
+      of a `section`/`article` node (i.e. some ancestor in its parent chain
+      is a body-class section). doc2dict's HTML walker sometimes mis-parents
+      a real attached subdoc (ANNEX I, EXHIBIT A) as a child of the last
+      body section it visited. If we're INSIDE a body section, we're past
+      the agreement title and cannot be the SEC envelope (which precedes
+      the title).
     """
     envelope_rows = [r for r in rows if r.get("is_envelope")]
     if not envelope_rows:
@@ -987,9 +998,30 @@ def _fix_post_signature_envelope(rows: list[dict[str, Any]]) -> list[dict[str, A
         children_of.setdefault(r.get("parent_node_id"), []).append(r)
 
     _BODY_CLASSES = frozenset({"section", "article"})
+
+    def _has_body_ancestor(node: dict[str, Any]) -> bool:
+        """Walk up the parent chain looking for a section/article ancestor."""
+        seen: set[int] = set()
+        cur_pid = node.get("parent_node_id")
+        while cur_pid is not None and cur_pid not in seen:
+            seen.add(cur_pid)
+            parent = by_node_id.get(cur_pid)
+            if parent is None:
+                return False
+            if (parent.get("cls") or "") in _BODY_CLASSES:
+                return True
+            cur_pid = parent.get("parent_node_id")
+        return False
+
     fixed = False
 
     for env_row in envelope_rows:
+        # Only consider subdoc-class envelopes for the fix — leaving
+        # `cls=introduction` or `cls=predicted header` envelope handling
+        # to its existing dedicated paths.
+        env_cls = (env_row.get("cls") or "")
+        if env_cls not in _SUBDOC_CLASSES:
+            continue
         parent_id = env_row.get("parent_node_id")
         siblings = children_of.get(parent_id, [])
         has_prior_body = False
@@ -999,11 +1031,21 @@ def _fix_post_signature_envelope(rows: list[dict[str, Any]]) -> list[dict[str, A
             if (sib.get("cls") or "") in _BODY_CLASSES:
                 has_prior_body = True
                 break
-        if not has_prior_body:
+
+        # Case A: sibling-based detection.
+        if has_prior_body:
+            env_row["is_envelope"] = False
+            fixed = True
             continue
 
-        env_row["is_envelope"] = False
-        fixed = True
+        # Case B: ancestor-based detection. A real SEC envelope sits at the
+        # root of the document tree (its parent chain has no body-class
+        # node). If we're inside an article/section ancestor, we cannot
+        # be the SEC envelope.
+        if _has_body_ancestor(env_row):
+            env_row["is_envelope"] = False
+            fixed = True
+            continue
 
     if not fixed:
         return rows
@@ -1024,6 +1066,126 @@ def _fix_post_signature_envelope(rows: list[dict[str, Any]]) -> list[dict[str, A
         if cls in _SUBDOC_CLASSES:
             for ch in children_of.get(env_row["node_id"], []):
                 _bump_penalty(ch["node_id"], 1)
+
+    return rows
+
+
+def _reparent_orphan_top_level_into_enclosing_subdoc(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Re-parent mis-parented nodes into the real-subdoc that encloses
+    them by source position.
+
+    doc2dict's HTML walker sometimes flattens a real-subdoc's descendants
+    (ARTICLE I, ARTICLE II, ... of an attached REGISTRATION RIGHTS
+    AGREEMENT, SECTION 4, 5, 6 ... of an attached CERTIFICATE OF
+    DESIGNATIONS) and either:
+      (A) leaves them with ``parent_node_id=None`` at the document root, or
+      (B) parents them as a SIBLING of the real subdoc under the last
+          main-agreement body section (e.g. ARTICLE VIII Miscellaneous).
+    In either case the records appear in source-order BETWEEN the
+    real-subdoc header (e.g. "ANNEX I CERTIFICATE OF DESIGNATIONS",
+    node_id N_subdoc) and the next real-subdoc header (e.g. "ANNEX II
+    REGISTRATION RIGHTS AGREEMENT", node_id N_next), and they are
+    structurally part of the enclosing subdoc.
+
+    Detection: a row whose node_id falls strictly between two consecutive
+    real-subdoc-header node_ids AND whose current parent_node_id is
+    OUTSIDE that span (None, or a pre-subdoc body node, or anything else
+    not inside the subdoc's source span) is re-parented to the enclosing
+    real subdoc.
+
+    Rule of thumb:
+      - The L0 title node itself is never re-parented.
+      - Real subdoc headers themselves are never re-parented (they are
+        the boundary markers).
+      - Records BEFORE the first real-subdoc header are untouched (they
+        belong to the main agreement body).
+      - Records AFTER the LAST real-subdoc header and outside its node-id
+        span are also re-parented to that last subdoc (e.g. the
+        Certificate of Designations' SECTION 21, 22, 23 that mis-attached
+        as siblings of ANNEX I rather than children).
+
+    Runs BEFORE ``_apply_scope_rule`` so the scope rule sees a correctly
+    nested tree.
+    """
+    by_node_id: dict[int, dict[str, Any]] = {r["node_id"]: r for r in rows}
+    children_of: dict[int | None, list[dict[str, Any]]] = {}
+    for r in rows:
+        pid = r.get("parent_node_id")
+        children_of.setdefault(pid, []).append(r)
+
+    real_subdoc_rows: list[dict[str, Any]] = []
+    for r in rows:
+        children = children_of.get(r["node_id"], [])
+        first_child_title = children[0]["title"] if children else None
+        if _is_real_subdoc_title(
+            r.get("title"), r.get("cls"), r.get("is_envelope", False), first_child_title
+        ):
+            real_subdoc_rows.append(r)
+
+    if not real_subdoc_rows:
+        return rows
+
+    real_subdoc_rows.sort(key=lambda r: r["node_id"])
+    subdoc_node_ids = [r["node_id"] for r in real_subdoc_rows]
+    subdoc_id_set: set[int] = set(subdoc_node_ids)
+
+    # Compute the source-span of each real subdoc: from its own node_id
+    # to (next subdoc node_id - 1). For the last subdoc, the span extends
+    # to the end of all node_ids in the document.
+    max_nid = max((r["node_id"] for r in rows), default=0)
+    subdoc_spans: list[tuple[int, int, dict[str, Any]]] = []  # (start, end_excl, subdoc)
+    for i, sub in enumerate(real_subdoc_rows):
+        start = sub["node_id"]
+        if i + 1 < len(real_subdoc_rows):
+            end = real_subdoc_rows[i + 1]["node_id"]
+        else:
+            end = max_nid + 1
+        subdoc_spans.append((start, end, sub))
+
+    def _is_in_span(nid: int, start: int, end: int) -> bool:
+        return start < nid < end
+
+    # For each enclosing subdoc, compute the node_id span [start, end).
+    # A record at node_id N is "inside subdoc S" iff S.start <= N < S.end.
+    enclosing_span_of: dict[int, tuple[int, int]] = {}
+    for start, end, sub in subdoc_spans:
+        enclosing_span_of[sub["node_id"]] = (start, end)
+
+    for r in rows:
+        nid = r["node_id"]
+        # Skip the real subdoc headers themselves (they are boundary
+        # markers, never re-parented).
+        if nid in subdoc_id_set:
+            continue
+        # Skip records before the first real subdoc.
+        if nid <= subdoc_node_ids[0]:
+            continue
+        # Skip L0 title and envelope nodes.
+        if r.get("is_envelope") and r.get("depth", 1) == 0:
+            continue
+        if r.get("depth") == 0 and not r.get("is_envelope"):
+            continue
+        # Find the enclosing subdoc span by node_id.
+        enclosing: dict[str, Any] | None = None
+        for start, end, sub in subdoc_spans:
+            if _is_in_span(nid, start, end):
+                enclosing = sub
+                break
+        if enclosing is None:
+            continue
+        enc_start, enc_end = enclosing_span_of[enclosing["node_id"]]
+        # Check current parent: if already inside (or IS) the enclosing
+        # subdoc by node-id span, leave it alone.
+        cur_pid = r.get("parent_node_id")
+        if cur_pid is not None and cur_pid in by_node_id:
+            if cur_pid == enclosing["node_id"]:
+                continue
+            if enc_start <= cur_pid < enc_end:
+                continue
+        # Re-parent into the enclosing subdoc.
+        r["parent_node_id"] = enclosing["node_id"]
 
     return rows
 
@@ -2588,6 +2750,250 @@ def _rescue_cover_preamble_block(rows: list[dict[str, Any]]) -> list[dict[str, A
     return out
 
 
+def _drop_toc_chrome_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop "TABLE OF CONTENTS" header and roman-numeral page-marker
+    records whose bodies are TOC entries.
+
+    Some EX-10 filings expose the TOC region to doc2dict as a sequence
+    of records:
+        TABLE OF CONTENTS  ← title; body lists ARTICLE/Section/PAGE entries
+        i                  ← page marker; body continues TOC entries
+        ii                 ← page marker; body continues TOC entries
+        iii                ← page marker; body MAY contain the real preamble
+        ARTICLE I ...      ← first body clause
+
+    The "TABLE OF CONTENTS" title and the bare roman-numeral page-marker
+    titles are layout chrome — they should not appear as L1 records.
+    Their bodies are either TOC continuation (cross-section, cross-page
+    redundancy) or, occasionally, the real preamble (page iii here
+    contains "INVESTMENT AGREEMENT, dated as of May 8, 2017...").
+
+    Rule (purely structural):
+      - A record titled "TABLE OF CONTENTS" (any case) is TOC chrome.
+        Mark as envelope to drop from JSONL; keep in parquet for audit.
+      - A record whose TITLE is a bare roman-numeral page marker (i,
+        ii, iii, iv, ...) is also TOC chrome IF its body looks like
+        TOC content (high density of Section N.M / ARTICLE X / PAGE
+        entries). If its body looks like REAL content (matches the
+        agreement preamble pattern "AGREEMENT, dated as of ..." or
+        starts with WHEREAS / NOW THEREFORE), KEEP the body but CLEAR
+        the title (so the body emits as a normal L1 record without the
+        page-number prefix).
+
+    Heuristic for "body looks like TOC":
+      - Count the matches of the pattern ``Section\\s+\\d+\\.\\d+`` in the
+        body. If >= 3 matches AND the body's total non-marker text is
+        mostly section headings (no paragraph-form sentences), treat
+        as TOC.
+      - Or: the body is very short and matches ``ARTICLE [IVX]+`` multiple
+        times.
+
+    Runs BEFORE _apply_scope_rule.
+    """
+    _TOC_TITLE_RE = re.compile(r"^\s*TABLE\s+OF\s+CONTENTS\b", re.IGNORECASE)
+    _PAGE_MARKER_TITLE_RE = re.compile(r"^\s*[ivxlcdm]+\s*$", re.IGNORECASE)
+    _TOC_BODY_SECTION_RE = re.compile(r"Section\s+\d+\.\d+", re.IGNORECASE)
+    _TOC_BODY_ARTICLE_RE = re.compile(r"^ARTICLE\s+[IVXLCDM]+\s*$", re.MULTILINE | re.IGNORECASE)
+    _PREAMBLE_BODY_RE = re.compile(
+        r"^[A-Z][A-Z ]{2,}\s+AGREEMENT,?\s+dated\s+as\s+of\b|^WHEREAS\b|^NOW,?\s+THEREFORE\b",
+        re.IGNORECASE,
+    )
+
+    def _is_toc_body(body: str) -> bool:
+        if not body or not body.strip():
+            return False
+        # If the body has obvious preamble content, NOT TOC.
+        if _PREAMBLE_BODY_RE.search(body[:300]):
+            return False
+        # Heuristic: count Section N.M occurrences AND check density.
+        section_matches = len(_TOC_BODY_SECTION_RE.findall(body))
+        article_matches = len(_TOC_BODY_ARTICLE_RE.findall(body))
+        if section_matches >= 3 or article_matches >= 3:
+            # Verify density: total body length should be dominated by
+            # short section-heading lines, not paragraph prose. If most
+            # lines are < 50 chars (typical TOC line), this is TOC.
+            lines = [ln.strip() for ln in body.split("\n") if ln.strip()]
+            if not lines:
+                return False
+            short_lines = sum(1 for ln in lines if len(ln) < 60)
+            return short_lines / len(lines) > 0.75
+        return False
+
+    for r in rows:
+        title = (r.get("title") or "").strip()
+        body = (r.get("body_direct") or "")
+
+        # Case 1: TABLE OF CONTENTS chrome header.
+        if _TOC_TITLE_RE.match(title):
+            r["is_envelope"] = True
+            continue
+
+        # Case 2: Bare roman-numeral page marker.
+        if _PAGE_MARKER_TITLE_RE.match(title):
+            if not body.strip():
+                # walk_sections already drops empty-body page markers,
+                # but be defensive.
+                r["is_envelope"] = True
+                continue
+            if _is_toc_body(body):
+                # Body is TOC continuation — drop entirely.
+                r["is_envelope"] = True
+                continue
+            # Body has real content — clear the page-number title so
+            # the body emits without the prefix.
+            r["title"] = ""
+
+    return rows
+
+
+def _rescue_post_title_cover_block(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rescue a cover-page block that appears AFTER the L0 title.
+
+    Some EX-10 filings put the agreement title FIRST and the
+    "by and among / parties / dated" cover block IMMEDIATELY AFTER it,
+    on the same cover page, before any TABLE OF CONTENTS or article
+    body. doc2dict captures each cover line as its own empty-body
+    predicted-header record, so they would otherwise emit as a bunch
+    of tiny L1 records ("by and among" / "PANDORA MEDIA, INC.," / "and"
+    / "Dated as of May 8, 2017").
+
+    The rescue collapses them into a single synthetic L1 record whose
+    span is the joined cover-line text (one line per source line). The
+    original records are marked as envelope so they don't double-emit
+    to JSONL but stay in the parquet for audit.
+
+    Detection (purely structural):
+      1. Find the L0 title.
+      2. Walk records by node_id starting RIGHT AFTER the L0 title.
+      3. Collect consecutive predicted-header records that:
+            - have a non-empty title,
+            - have an empty body,
+            - are NOT a TABLE OF CONTENTS or other TOC chrome,
+            - are NOT a real subdoc, ARTICLE, or SECTION header.
+      4. Stop at the FIRST record that breaks the chain (any record
+         with body content, or a structural header).
+      5. If at least 2 consecutive cover lines collected, merge them
+         into ONE synthetic L1 record and mark originals as envelope.
+
+    No-op when:
+      - No L0 title found.
+      - The duplicate-title cover rescue already fired (we leave that
+        case to ``_rescue_cover_preamble_block``).
+      - Fewer than 2 candidate post-title cover lines.
+
+    Runs AFTER ``_rescue_cover_preamble_block`` so that filings with the
+    duplicate-title pattern are handled by the older rescue and we don't
+    double-process.
+    """
+    l0: dict[str, Any] | None = None
+    for r in rows:
+        if (
+            r.get("depth") == 0
+            and not r.get("is_envelope")
+            and r.get("scope") == "agreement"
+        ):
+            l0 = r
+            break
+    if l0 is None:
+        return rows
+
+    l0_node_id = l0["node_id"]
+
+    # If the duplicate-title rescue already produced a cover-preamble
+    # record for this idx, don't re-do the work.
+    for r in rows:
+        if r.get("_cover_preamble"):
+            return rows
+
+    # Patterns that disqualify a record from being a cover-line:
+    _TOC_TITLE_RE = re.compile(r"^\s*TABLE\s+OF\s+CONTENTS\b", re.IGNORECASE)
+    _STRUCTURAL_HEADER_RE = re.compile(
+        r"^\s*(?:ARTICLE\s+\w+|SECTION\s+\d|\d+\.\s|EXHIBIT\s+|SCHEDULE\s+|APPENDIX\s+|ANNEX\s+)",
+        re.IGNORECASE,
+    )
+    _RECITAL_RE = re.compile(
+        r"^\s*(?:WHEREAS|RECITALS|WITNESSETH|NOW,?\s+THEREFORE)",
+        re.IGNORECASE,
+    )
+
+    candidates: list[dict[str, Any]] = []
+    for r in sorted(rows, key=lambda x: x["node_id"]):
+        if r["node_id"] <= l0_node_id:
+            continue
+        if r.get("is_envelope") or r.get("scope") == "trailer":
+            break
+        title = (r.get("title") or "").strip()
+        body = (r.get("body_direct") or "").strip()
+        cls = (r.get("cls") or "")
+        # Empty-title records are skipped at emission anyway; treat them
+        # as inert padding and skip without breaking the chain.
+        if not title and not body:
+            continue
+        # Break on any record with body content (real preamble / first
+        # body clause) or any structural header.
+        if body:
+            break
+        if _TOC_TITLE_RE.match(title):
+            break
+        if _STRUCTURAL_HEADER_RE.match(title):
+            break
+        if _RECITAL_RE.match(title):
+            break
+        # Subdoc-class records (cls=exhibit/schedule/appendix/annex)
+        # are real attachments — don't absorb them into the cover.
+        if cls in _SUBDOC_CLASSES:
+            break
+        # Only consider predicted-header records (doc2dict's category for
+        # un-structured headers). Other class records that survived this
+        # far are not cover lines.
+        if cls not in {"predicted header", "promoted text leaf"}:
+            break
+        candidates.append(r)
+
+    # Need at least 2 cover lines to make a worthwhile rescue.
+    if len(candidates) < 2:
+        return rows
+
+    cover_span = "\n".join((c.get("title") or "").strip() for c in candidates)
+    if not cover_span:
+        return rows
+
+    next_id = max((r["node_id"] for r in rows), default=-1) + 1
+    cover_row: dict[str, Any] = {
+        "node_id": next_id,
+        "parent_node_id": l0_node_id,
+        "depth": 1 + (l0.get("subdoc_penalty") or 0),
+        "doc2dict_section_key": f"_post_title_cover_{next_id}",
+        "cls": "promoted text leaf",
+        "title": "",
+        "standardized_title": None,
+        "n_direct_section_children": 0,
+        "body_direct_chars": len(cover_span),
+        "body_recursive_chars": len(cover_span),
+        "body_direct": cover_span,
+        "body_recursive": cover_span,
+        "subdoc_penalty": l0.get("subdoc_penalty") or 0,
+        "is_envelope": False,
+        "scope": "agreement",
+        "_cover_preamble": True,
+    }
+
+    # Mark the original cover-line records as envelope so JSONL drops
+    # them; parquet still records the rows.
+    candidate_ids = {c["node_id"] for c in candidates}
+    for r in rows:
+        if r["node_id"] in candidate_ids:
+            r["is_envelope"] = True
+
+    # Insert the synthetic record directly after the L0 title.
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        out.append(r)
+        if r["node_id"] == l0_node_id:
+            out.append(cover_row)
+    return out
+
+
 def _drop_pre_title_cover_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drop filing-cover records that appear BEFORE the L0 agreement title.
 
@@ -3400,6 +3806,20 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
     document_tree = result.get("document", {}) if isinstance(result, dict) else {}
     sections = walk_sections(document_tree, depth=0)
     sections = _fix_post_signature_envelope(sections)
+    # Drop TOC chrome ("TABLE OF CONTENTS" header + roman-numeral page
+    # markers whose bodies are TOC continuation). The bare roman-numeral
+    # walk_sections drop already handles the empty-body case; this
+    # function handles the case where doc2dict left a body of TOC
+    # entries attached to the page marker. The LAST page marker's body
+    # sometimes carries the real preamble — when so, clear the title
+    # only and preserve the body for downstream emission.
+    sections = _drop_toc_chrome_records(sections)
+    # doc2dict's HTML walker can flatten a real-subdoc's descendants up to
+    # the document tree root (parent_node_id=None). Re-parent those orphan
+    # top-level nodes into the enclosing real subdoc by source position
+    # BEFORE the scope rule classifies them, so the subdoc's body content
+    # is correctly recognized as in-scope.
+    sections = _reparent_orphan_top_level_into_enclosing_subdoc(sections)
     sections = _apply_scope_rule(sections)
     # Collapse each real subdoc (named exhibit/schedule/appendix/annex
     # with descriptive title or descriptive first-child) into ONE L1
@@ -3425,6 +3845,13 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
     # preamble. Emit it as one L1 record after the L0 title. Per
     # Arthur's annotation for idx=1 (Defect 1).
     sections = _rescue_cover_preamble_block(sections)
+    # Post-title cover-line rescue: when the L0 title is followed
+    # immediately by a "by and among / parties / dated" block on the
+    # cover page (rather than preceded by a duplicate title), collapse
+    # those consecutive empty-body predicted-header lines into ONE
+    # synthetic L1 cover-preamble record. Mirrors the duplicate-title
+    # rescue but for the simpler title-first cover layout.
+    sections = _rescue_post_title_cover_block(sections)
     sections = _split_inline_section_markers(sections)
     # Numbered subsections "N.M" buried in Article bodies (e.g.
     # "1.1 ... 1.2 ... 1.3 ..." inside ARTICLE 1's body) get split out

@@ -2051,73 +2051,168 @@ def _reclassify_letter_i_to_alphabetical(
 # Signature line: "/s/ Jane Doe", "/s/ Terrance K. Wallberg".
 _SIGN_OFF_RE = re.compile(r"/s/\s+\w+")
 
-# A "fragmented signature anchor" is a record whose TITLE itself starts
-# with the /s/ marker. Such a record represents the signature line as
-# its own standalone node — typically the result of doc2dict's HTML
-# walker fragmenting the signature block across multiple section nodes
-# (one per visual line). A record whose BODY contains /s/ but whose
-# title is the party name is ALREADY a consolidated signature block —
-# we leave that one alone.
+# A "signature anchor" is a record whose TITLE or BODY contains a /s/
+# signature line. Detected by SHAPE only — no party-name matching.
 _SIG_TITLE_ANCHOR_RE = re.compile(r"^\s*/s/\s+\w+")
 
-# "Continuation" content typical of signature block lines after /s/:
-# By:/Name:/Title:/Address: prefixes, or a bare name on its own line.
-_SIG_BLOCK_CONTINUATION_RE = re.compile(
-    r"(?i)^(?:by\s*:|name\s*:|title\s*:|address\s*:|/s/\s)",
+# Per-line shape detectors for a signature-page line. Each is a SHAPE
+# match — no specific names, companies, or party labels are encoded.
+# A signature-page line is one of:
+#   - "/s/ <name>"               (signature mark)
+#   - "By: <something>"          (by-line, possibly carrying /s/)
+#   - "Name: <name>"             (name field)
+#   - "Title: <title>"           (title field)
+#   - "Address: <addr>"          (address field, possibly bare "Address:")
+#   - A bare uppercase party label (1-3 words all caps)
+#   - A bare proper-noun name line
+# These are structural cues that occur in signature pages across many
+# agreement types — they are not phrase blocklists.
+_SIG_FIELD_RE = re.compile(
+    r"(?i)^(?:by\s*:|name\s*:|title\s*:|address\s*:?)\s*",
 )
 
 # Short uppercase tag that acts as a signature-block party label
-# (e.g. "INDEMNITEE", "INDEMNITOR", "LENDER", "BORROWER"). Detected by
-# SHAPE — 1-3 words, all uppercase letters (or with light punctuation),
-# not enumeration-driven.
+# (e.g. an "INDEMNITEE"/"BORROWER"/"LENDER"-style role label). Detected
+# by SHAPE — 1-3 words, all uppercase letters (or with light
+# punctuation), not enumeration-driven. No specific labels are encoded.
 _SIG_BLOCK_LABEL_RE = re.compile(r"^[A-Z][A-Z .,&'\-]{1,40}$")
 
+# Signature-page banner line — typesetter chrome telling the reader the
+# signature page follows. Examples: "SIGNATURE PAGE TO FOLLOW", "[Signature
+# Page Follows]", "-- Signature Page --". Detected by SHAPE: the word
+# "signature" adjacent to the word "page", optionally bracketed/dashed.
+# This is page-layout chrome injected by typesetters, not agreement
+# content (per the title-as-root rule).
+_SIG_PAGE_BANNER_RE = re.compile(
+    r"(?i)^\s*[\[\-—]?\s*signature\s+page\b",
+)
 
-def _merge_signature_blocks(
+# Page-number-only line (one or two-digit, possibly bracketed/centered).
+# Common in signature-page footer chrome ("- 5 -", "[5]", "5.").
+_PAGE_NUMBER_FOOTER_RE = re.compile(
+    r"^\s*[\[\(\-—]?\s*\d{1,3}\s*[\]\)\-—.]?\s*$",
+)
+
+# Exhibit-reference footer ("Exhibit 10.25", "EX-10.1") used as a
+# page-bottom watermark on signature pages. Detected as: an exhibit
+# token plus a number, alone on the line, in the signature area.
+_EXHIBIT_FOOTER_RE = re.compile(
+    r"(?i)^\s*(?:exhibit|ex)[\s\-]\s*\d+(?:\.\d+)?\s*$"
+)
+
+
+def _looks_like_sig_page_line(span: str) -> bool:
+    """Shape-detect a signature-page line.
+
+    True if the span matches any structural cue typical of signature-
+    page lines: a /s/ mark, a By:/Name:/Title:/Address: field, a
+    short uppercase party label, or a single-line name-shaped text.
+    """
+    span = (span or "").strip()
+    if not span:
+        return False
+    if _SIGN_OFF_RE.search(span):
+        return True
+    if _SIG_FIELD_RE.match(span):
+        return True
+    if _SIG_BLOCK_LABEL_RE.match(span):
+        return True
+    return False
+
+
+def _is_iww_clause(text: str) -> bool:
+    """Shape-detect the 'IN WITNESS WHEREOF' operating clause.
+
+    The IWW clause is the signature-page header in traditional
+    agreements. Detected by the canonical uppercase phrase appearing at
+    the start of the span. No specific agreement words encoded.
+    """
+    if not text:
+        return False
+    return bool(re.match(r"(?i)^\s*IN\s+WITNESS\s+WHEREOF", text.strip()))
+
+
+def _split_sig_block_body_into_lines(body: str) -> list[str]:
+    """Split a consolidated signature-block body into per-line records.
+
+    The body is multi-line text where each line is one signature-page
+    line (By:/Name:/Title:/Address:/<name>/<role>). Split on newlines,
+    strip whitespace/nbsp runs, drop empty lines, drop any line that
+    matches a signature-page banner or page-number footer pattern.
+    Returns the cleaned per-line list.
+    """
+    if not body:
+        return []
+    # doc2dict preserves &nbsp; as \xa0. Collapse runs of whitespace
+    # *within* a line but keep line breaks intact, so each visual line
+    # becomes one element.
+    lines = body.replace("\xa0", " ").split("\n")
+    out: list[str] = []
+    for raw_line in lines:
+        line = " ".join(raw_line.split()).strip()
+        if not line:
+            continue
+        # Drop signature-page footer chrome that landed inside the body.
+        if _SIG_PAGE_BANNER_RE.match(line):
+            continue
+        if _PAGE_NUMBER_FOOTER_RE.match(line):
+            continue
+        if _EXHIBIT_FOOTER_RE.match(line):
+            continue
+        out.append(line)
+    return out
+
+
+def _explode_signature_block_lines(
     rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Merge signature-block fragments into a single record per party.
+    """Apply the title-as-root signature-page rubric (level_rubric.md /
+    examples_main_agreement.md).
 
-    Pattern this fixes (doc2dict's HTML-walker fragmentation of the
-    signature block on the indemnitee side):
-        nid=64  "ULURU Inc."          body="By: /s/ Terrance K. Wallberg\\nName: ...\\nTitle: ..."  <- 1 record (already consolidated)
-        nid=65  "INDEMNITEE"          body=""    <- party label
-        nid=66  "/s/ Vaidehi Shah"    body=""    <- signature line
-        nid=67  "Vaidehi Shah"        body="Address: ..."  <- name + address
+    Three transformations, all SHAPE-driven (no party-name or company-
+    name matching):
 
-    The Company side (nid=64) already merges title + body. The Indemnitee
-    side comes through as a parent-child chain (each node's parent is the
-    previous node). All four pieces are ONE LOGICAL party block.
+      1. **Strip signature-page banner chrome.** Records whose title
+         matches the signature-page banner shape (e.g. "SIGNATURE PAGE
+         TO FOLLOW", "[Signature Page Follows]") are stripped of their
+         banner title. If they carry substantive body content (an IWW
+         operating clause or any non-banner text), the body is
+         preserved and the title is cleared. If they carry no
+         substantive content, they are marked is_envelope=True so the
+         JSONL writer drops them.
 
-    Symmetric structural rule (detect by SHAPE, not by enumeration):
-      1. Find every record whose span contains `/s/\\s+\\w+` (signature line).
-      2. From the signature-line record, walk BACK through the document-
-         order neighbour records: absorb any short uppercase party label
-         (1-3 words, all caps) sitting immediately before the signature.
-      3. Walk FORWARD: absorb subsequent records whose body matches a
-         signature-block continuation pattern (By:/Name:/Title:/Address:)
-         or that are bare name lines without their own section marker.
-      4. Merge all absorbed records into ONE record with the leading
-         label as title (when present) and the concatenated body of all
-         the rest.
+      2. **Pin the IWW operating clause at L1.** A record whose
+         title/body begins with "IN WITNESS WHEREOF" is the signature
+         page's operating clause. Its depth is set to
+         1 + subdoc_penalty (a direct child of the agreement).
 
-    The merge applies only when the absorbed records form an unbroken
-    parent-child chain at the signature block's depth — meaning they
-    represent the same party's signature, not two parties' blocks.
+      3. **Explode consolidated signature-block records to L2 lines.**
+         The HTML walker often packs a party's signature block as one
+         record:
+            title="<party-label>"  body="By: /s/ ...\\nName: ...\\nTitle: ..."
+         Per the rubric, each signature-page line is its own depth-2
+         record (flat siblings; document order encodes party
+         grouping). The function splits multi-line bodies into one
+         L2 record per line, with the leading party-label record kept
+         at depth 2 as well.
+
+         For records that already exist as one-line fragments (the
+         HTML walker fragmented the signature block across multiple
+         section nodes — e.g. "/s/ <name>" with empty body, then
+         "<name>" with body="Address:"), depth is simply set to
+         2 + subdoc_penalty without modification.
+
+    Detection is purely SHAPE-BASED: a "signature carrier" is any
+    record whose span (title+body) contains the /s/ marker, OR whose
+    title is a short uppercase party label whose body starts with a
+    By:/Name:/Title:/Address: field, OR whose title is the /s/ line
+    itself. No specific labels (INDEMNITEE, BORROWER, etc.) are
+    encoded.
     """
-    by_node_id = {r["node_id"]: r for r in rows}
-    children_of: dict[int | None, list[dict[str, Any]]] = {}
-    for r in rows:
-        children_of.setdefault(r.get("parent_node_id"), []).append(r)
-    for pid in children_of:
-        children_of[pid].sort(key=lambda r: r["node_id"])
+    if not rows:
+        return rows
 
-    actives = [
-        r for r in rows
-        if not r.get("is_envelope") and r.get("scope") != "trailer"
-    ]
-    actives.sort(key=lambda r: r["node_id"])
-    active_index = {r["node_id"]: i for i, r in enumerate(actives)}
+    by_node_id = {r["node_id"]: r for r in rows}
 
     def _span_text(r: dict[str, Any]) -> str:
         t = (r.get("title") or "").strip()
@@ -2134,184 +2229,326 @@ def _merge_signature_blocks(
             return False
         return _classify_subsection_kind(title) is not None
 
-    visited: set[int] = set()
-    new_rows: list[dict[str, Any]] = []
-
-    def _is_in_cluster_chain(node: dict[str, Any], cluster_ids: set[int]) -> bool:
-        """True if node's tree-parent chain leads into the cluster."""
+    def _chain_ancestor_node_ids(node: dict[str, Any]) -> set[int]:
+        """Walk up parent_node_id chain, returning all ancestor ids."""
+        ids: set[int] = set()
         cur = node.get("parent_node_id")
-        seen: set[int] = set()
-        while cur is not None and cur not in seen:
-            seen.add(cur)
-            if cur in cluster_ids:
-                return True
+        while cur is not None and cur not in ids:
+            ids.add(cur)
             parent = by_node_id.get(cur)
             if parent is None:
                 break
             cur = parent.get("parent_node_id")
-        return False
+        return ids
 
-    # Iterate through actives in order. The anchor is a record whose
-    # TITLE itself starts with /s/ — that's the structural marker of
-    # signature-block FRAGMENTATION. A record whose BODY contains /s/
-    # but title is a party name is already consolidated; skip it.
-    i = 0
-    while i < len(actives):
-        r = actives[i]
-        if r["node_id"] in visited:
-            i += 1
+    # PASS 1: strip signature-page banner chrome from titles. Banner
+    # detection is purely shape-based (the word "signature" adjacent to
+    # the word "page" at line start, optionally bracketed/dashed).
+    for r in rows:
+        if r.get("is_envelope") or r.get("scope") == "trailer":
             continue
         title = (r.get("title") or "").strip()
-        is_anchor = bool(_SIG_TITLE_ANCHOR_RE.match(title))
-        if not is_anchor:
-            new_rows.append(r)
-            visited.add(r["node_id"])
-            i += 1
+        body = (r.get("body_direct") or "").strip()
+        if not title or not _SIG_PAGE_BANNER_RE.match(title):
             continue
+        if body and not _SIG_PAGE_BANNER_RE.match(body):
+            # Body carries substantive content (typically the IWW
+            # operating clause). Clear the banner title; the JSONL
+            # writer emits the body alone.
+            r["title"] = ""
+        else:
+            # No substantive body — record is banner chrome only.
+            r["is_envelope"] = True
 
-        # Found a fragmented signature anchor. Build the cluster.
-        cluster_start_i = i
-        # Walk BACK to absorb a leading party label, if any. Note: the
-        # `visited` check is NOT used here because party labels were
-        # already appended to `new_rows` in earlier iterations; we may
-        # need to retroactively remove them from `new_rows` once we
-        # absorb them into this cluster.
-        while cluster_start_i > 0:
-            prev = actives[cluster_start_i - 1]
-            prev_title = (prev.get("title") or "").strip()
-            prev_body = (prev.get("body_direct") or "").strip()
-            if not prev_title or prev_body:
+    # PASS 2: identify signature carriers and pin the IWW operating
+    # clause at L1.
+    #
+    # A "signature carrier" is any record whose span contains a /s/
+    # marker. Around each carrier we expand outward to identify the
+    # full party-block: leading party-label record(s), continuation
+    # field records (By:/Name:/Title:/Address:), and bare-name
+    # continuation records. Membership in the block is established by
+    # the tree-chain relation (records in the same parent-chain as the
+    # /s/ carrier).
+    actives = [
+        r for r in rows
+        if not r.get("is_envelope") and r.get("scope") != "trailer"
+    ]
+    actives.sort(key=lambda r: r["node_id"])
+
+    # Pin the IWW operating clause depth=1.
+    iww_present = False
+    for r in actives:
+        span = _span_text(r)
+        if _is_iww_clause(span):
+            r["depth"] = 1 + (r.get("subdoc_penalty") or 0)
+            iww_present = True
+
+    if not any(_SIGN_OFF_RE.search(_span_text(r)) for r in actives):
+        # No /s/ anywhere — nothing more to do. Even modern agreements
+        # without an IWW clause will have /s/ lines or we don't treat
+        # this as a signature area.
+        return rows
+
+    # Build a set of sig-line node_ids using tree-chain expansion from
+    # each /s/-carrier. This stays purely structural: a record is
+    # marked as a signature-page line iff it's the /s/ carrier itself,
+    # OR an ancestor that is a short uppercase party label, OR an
+    # immediate descendant that fits a sig-field continuation.
+    sig_line_node_ids: set[int] = set()
+
+    # The /s/-carriers themselves.
+    sig_carriers: list[dict[str, Any]] = []
+    for r in actives:
+        if _SIGN_OFF_RE.search(_span_text(r)):
+            sig_carriers.append(r)
+            sig_line_node_ids.add(r["node_id"])
+
+    # Expand UP each chain: ancestors that are short uppercase party
+    # labels (with empty body or sig-shape body) join the block. Stop
+    # at the first ancestor that bears a section marker (numbered or
+    # lettered) — that's an agreement clause, not a sig-block parent.
+    for carrier in sig_carriers:
+        cur = carrier.get("parent_node_id")
+        seen: set[int] = set()
+        while cur is not None and cur not in seen:
+            seen.add(cur)
+            parent = by_node_id.get(cur)
+            if parent is None:
                 break
-            if not _SIG_BLOCK_LABEL_RE.match(prev_title):
-                break
-            if _has_section_marker_title(prev):
-                break
-            # Already-consolidated /s/ block? Don't absorb.
-            if _SIGN_OFF_RE.search(prev_body) or _SIGN_OFF_RE.search(prev_title):
-                # A previous /s/ record that's ALREADY in its own
-                # consolidated record — stop, don't merge across
-                # different parties.
-                break
-            # Chain test: prev must be a direct ancestor of r in the
-            # tree (parent, grandparent, ...). Otherwise leave alone.
-            chain_ok = False
-            cur = r.get("parent_node_id")
-            seen: set[int] = set()
-            while cur is not None and cur not in seen:
-                seen.add(cur)
-                if cur == prev["node_id"]:
-                    chain_ok = True
-                    break
-                parent = by_node_id.get(cur)
-                if parent is None:
-                    break
+            if parent.get("is_envelope") or parent.get("scope") == "trailer":
                 cur = parent.get("parent_node_id")
-            if not chain_ok:
+                continue
+            if _has_section_marker_title(parent):
                 break
-            # Absorb prev into the cluster — retroactively remove it
-            # from new_rows if it was added in a previous loop iteration.
-            if prev in new_rows:
-                new_rows.remove(prev)
-            cluster_start_i -= 1
+            p_title = (parent.get("title") or "").strip()
+            p_body = (parent.get("body_direct") or "").strip()
+            # Party-label ancestor: short uppercase title, body empty
+            # OR body is sig-shape continuation content.
+            if (
+                p_title
+                and _SIG_BLOCK_LABEL_RE.match(p_title)
+                and (
+                    not p_body
+                    or _SIG_FIELD_RE.match(p_body)
+                    or _SIGN_OFF_RE.search(p_body)
+                )
+            ):
+                sig_line_node_ids.add(parent["node_id"])
+                cur = parent.get("parent_node_id")
+                continue
+            # IWW operating clause ancestor — that's L1, not part of
+            # the L2 sig-line set. Don't add to sig_line_node_ids but
+            # also don't break the chain (it may itself have a
+            # short-uppercase parent label above it).
+            if _is_iww_clause(_span_text(parent)):
+                cur = parent.get("parent_node_id")
+                continue
+            break
 
-        # Walk FORWARD from the /s/ anchor to absorb continuation
-        # records that are IN THE TREE-CHAIN of the cluster — name
-        # lines, By:/Name:/Title:/Address: lines, address blanks.
-        cluster_end_i = i  # inclusive
-        for j in range(i + 1, len(actives)):
-            nxt = actives[j]
-            if nxt["node_id"] in visited:
-                break
-            nxt_title = (nxt.get("title") or "").strip()
-            nxt_body = (nxt.get("body_direct") or "").strip()
-            # Stop on any record with a section marker — that's a
-            # clause start.
-            if _has_section_marker_title(nxt):
-                break
-            cluster_node_ids = {actives[k]["node_id"] for k in range(cluster_start_i, j)}
-            # Stop unless the candidate is in the parent-chain of the
-            # cluster. This prevents leaking into the preamble (whose
-            # parent is the L0 title, not in the cluster).
-            if not _is_in_cluster_chain(nxt, cluster_node_ids):
-                break
-            # If the candidate's content suggests a new SIGNATURE BLOCK
-            # for a different party (its own /s/ at title start), stop
-            # — that's another party's anchor.
-            if _SIG_TITLE_ANCHOR_RE.match(nxt_title):
-                # If it's in our chain it's part of our block; that's
-                # fine, continue absorbing.
-                pass
-            # Otherwise absorb as continuation if shape is signature-
-            # block-like (short label, By:/Name:/Title:/Address:, or a
-            # bare body continuation).
-            absorbed = False
-            if _SIG_BLOCK_CONTINUATION_RE.search(nxt_title):
-                absorbed = True
-            elif nxt_body and _SIG_BLOCK_CONTINUATION_RE.search(nxt_body[:80]):
-                absorbed = True
-            elif not nxt_title and nxt_body:
-                absorbed = True
-            elif nxt_title and not nxt_body and len(nxt_title.split()) <= 4:
-                absorbed = True
-            elif nxt_title and nxt_body:
-                # Mixed title+body in chain — absorb (e.g. "Vaidehi Shah"
-                # with body "Address:").
-                absorbed = True
-            if not absorbed:
-                break
-            cluster_end_i = j
+    # Expand DOWN each carrier's tree chain: descendants whose
+    # title or body fits sig-shape continuation join the block.
+    children_of: dict[int | None, list[dict[str, Any]]] = {}
+    for r in rows:
+        children_of.setdefault(r.get("parent_node_id"), []).append(r)
 
-        # Now merge actives[cluster_start_i .. cluster_end_i] into one
-        # record. Take the LEADING record as the merged record's
-        # identity (its node_id, parent_node_id, depth, subdoc_penalty).
-        # Concatenate spans (title \n body) in order.
-        cluster = actives[cluster_start_i:cluster_end_i + 1]
-        if len(cluster) == 1:
+    def _walk_descendants(nid: int) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        stack = [nid]
+        seen: set[int] = set()
+        while stack:
+            cur = stack.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            for c in children_of.get(cur, []):
+                out.append(c)
+                stack.append(c["node_id"])
+        return out
+
+    for carrier in sig_carriers:
+        for d in _walk_descendants(carrier["node_id"]):
+            if d.get("is_envelope") or d.get("scope") == "trailer":
+                continue
+            if _has_section_marker_title(d):
+                continue
+            d_title = (d.get("title") or "").strip()
+            d_body = (d.get("body_direct") or "").strip()
+            span = _span_text(d)
+            # Sig-field-shape: By:/Name:/Title:/Address: prefix on
+            # title or body; or a short label; or a /s/ carrier; or a
+            # bare-name shape (no enumeration, no section marker, in-
+            # chain with the carrier — guaranteed since this is a
+            # descendant walk).
+            looks_sig = (
+                _SIGN_OFF_RE.search(span)
+                or _SIG_FIELD_RE.match(d_title)
+                or _SIG_FIELD_RE.match(d_body)
+                or (d_title and _SIG_BLOCK_LABEL_RE.match(d_title) and not d_body)
+                or (d_title and not d_body)  # bare name as title
+                or (not d_title and d_body and _SIG_FIELD_RE.match(d_body))
+            )
+            if looks_sig:
+                sig_line_node_ids.add(d["node_id"])
+
+    # PASS 3: explode each sig-line record so that depth=2 and any
+    # multi-line bodies are split into per-line L2 records.
+    new_rows: list[dict[str, Any]] = []
+    next_id = max((r["node_id"] for r in rows), default=-1) + 1
+
+    def _make_fragment(
+        parent: dict[str, Any],
+        title: str,
+        body: str,
+        key_suffix: str,
+    ) -> dict[str, Any]:
+        nonlocal next_id
+        nid = next_id
+        next_id += 1
+        return {
+            "node_id": nid,
+            "parent_node_id": parent.get("parent_node_id"),
+            "depth": 2 + (parent.get("subdoc_penalty") or 0),
+            "doc2dict_section_key": f"_sigline_{key_suffix}_{nid}",
+            "cls": "promoted text leaf",
+            "title": title,
+            "standardized_title": None,
+            "n_direct_section_children": 0,
+            "body_direct_chars": len(body),
+            "body_recursive_chars": len(body),
+            "body_direct": body,
+            "body_recursive": body,
+            "subdoc_penalty": parent.get("subdoc_penalty") or 0,
+            "is_envelope": False,
+            "scope": "agreement",
+            "_sig_line": True,
+        }
+
+    # Each sig-line record gets a sequential `_sig_order` value that
+    # records its document position within the signature page. The
+    # post-sort consolidation uses this to keep parent + fragments
+    # adjacent (e.g. "ULURU Inc.", then its By/Name/Title fragments,
+    # then "INDEMNITEE", then its /s//name/Address fragments).
+    sig_order_counter = 0
+
+    def _next_sig_order() -> int:
+        nonlocal sig_order_counter
+        sig_order_counter += 1
+        return sig_order_counter
+
+    for r in rows:
+        if r.get("is_envelope") or r.get("scope") == "trailer":
             new_rows.append(r)
-            visited.add(r["node_id"])
-            i += 1
             continue
+        if r["node_id"] not in sig_line_node_ids:
+            new_rows.append(r)
+            continue
+        # This record is a signature-page line. Set its depth to L2
+        # (plus any subdoc penalty), and tag it with _sig_line so the
+        # post-sort step can group all sig-line records contiguously
+        # after the IWW operating clause (or at the document end if
+        # IWW is absent).
+        l2_depth = 2 + (r.get("subdoc_penalty") or 0)
+        r["_sig_line"] = True
+        r["_sig_order"] = _next_sig_order()
+        title = (r.get("title") or "").strip()
+        body = (r.get("body_direct") or "").strip()
+        body_lines = _split_sig_block_body_into_lines(body)
 
-        leader = cluster[0]
-        merged_parts: list[str] = []
-        for c in cluster:
-            ct = (c.get("title") or "").strip()
-            cb = (c.get("body_direct") or "").strip()
-            piece = "\n".join(p for p in (ct, cb) if p)
-            if piece:
-                merged_parts.append(piece)
-        merged_body = "\n".join(merged_parts[1:]) if len(merged_parts) > 1 else ""
-        leader_title = (leader.get("title") or "").strip()
-        # If the leader's title is empty but its body is non-empty,
-        # promote the first line of the body as the title.
-        if not leader_title and merged_parts:
-            leader_title = merged_parts[0].split("\n", 1)[0]
-            # And drop the leader piece from merged_body since it's now title.
-            # (We already excluded it from merged_body above by slicing [1:].)
+        if len(body_lines) >= 2:
+            # Consolidated party-block. Title stays as its own L2
+            # record (party label, /s/ line, or name); body lines
+            # each become their own L2 record. Fragments take the
+            # next sequential sig_order so they stay grouped with
+            # their parent.
+            r["body_direct"] = ""
+            r["body_direct_chars"] = 0
+            r["depth"] = l2_depth
+            new_rows.append(r)
+            for line in body_lines:
+                frag = _make_fragment(r, "", line, "body")
+                frag["_sig_order"] = _next_sig_order()
+                new_rows.append(frag)
+        elif len(body_lines) == 1:
+            # Single-line body — split as a separate L2 record so the
+            # title and the body are distinct sig-page lines (e.g.
+            # title="Vaidehi Shah", body="Address:").
+            body_line = body_lines[0]
+            r["body_direct"] = ""
+            r["body_direct_chars"] = 0
+            r["depth"] = l2_depth
+            new_rows.append(r)
+            frag = _make_fragment(r, "", body_line, "body")
+            frag["_sig_order"] = _next_sig_order()
+            new_rows.append(frag)
+        else:
+            # No body — just set depth.
+            r["depth"] = l2_depth
+            new_rows.append(r)
 
-        leader["title"] = leader_title
-        leader["body_direct"] = merged_body
-        leader["body_direct_chars"] = len(merged_body)
-        # Mark the absorbed (non-leader) cluster members as envelope so
-        # they drop from JSONL. Their data stays in parquet via the
-        # all_section_records list for audit.
-        for c in cluster[1:]:
-            c["is_envelope"] = True
-            visited.add(c["node_id"])
-        visited.add(leader["node_id"])
-        new_rows.append(leader)
-        # Advance past the consumed cluster.
-        i = cluster_end_i + 1
+    return new_rows
 
-    # Some non-active rows (envelope/trailer) were not added above; add
-    # them back in their original positions to preserve the parquet view.
-    # Build the final list by walking original `rows` and substituting
-    # the merged leaders in place of the consumed records.
-    consumed = {nid for nid in visited if by_node_id[nid].get("is_envelope") and nid not in {r["node_id"] for r in rows if r.get("is_envelope") and not by_node_id.get(nid)}}
-    # The above is paranoid — simpler: every row stays in the list,
-    # but consumed cluster members have is_envelope=True so JSONL drops
-    # them. We just return `rows` (mutated in place).
-    return rows
+
+def _consolidate_sig_lines_after_iww(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Move signature-page line records into one contiguous block right
+    after the IWW operating clause (or after the last non-sig record in
+    document order, if IWW is absent).
+
+    This runs AFTER `_sort_records_by_source_position`. The position
+    sorter's source-text search can mis-locate short sig-line records
+    like "ULURU Inc." (where the same string also appears inside a
+    Section 17 Notices address block). Once the sort is done we
+    structurally anchor the sig block to the IWW position so the JSONL
+    order matches the source's signature-page order.
+
+    Records carrying `_sig_line=True` are the sig-page lines. Their
+    relative order is preserved by sorting on `node_id` (the input
+    order from doc2dict's HTML walker, which matches the visual order
+    inside the sig page).
+    """
+    sig_records: list[dict[str, Any]] = []
+    non_sig_records: list[dict[str, Any]] = []
+    iww_index: int | None = None
+    for r in rows:
+        if r.get("_sig_line"):
+            sig_records.append(r)
+        else:
+            non_sig_records.append(r)
+
+    if not sig_records:
+        return rows
+
+    # Sort sig records by `_sig_order`, the emission-order tag set
+    # during explosion. This keeps parent + fragments adjacent (e.g.
+    # the ULURU Inc. record followed by its By/Name/Title fragments,
+    # then INDEMNITEE followed by its /s//name/Address fragments)
+    # rather than interleaving the two parties' lines.
+    sig_records.sort(key=lambda r: (r.get("_sig_order", 0), r["node_id"]))
+
+    # Find the IWW record in non_sig_records. The IWW is the L1 record
+    # whose span begins with "IN WITNESS WHEREOF".
+    for i, r in enumerate(non_sig_records):
+        if r.get("is_envelope") or r.get("scope") == "trailer":
+            continue
+        t = (r.get("title") or "").strip()
+        b = (r.get("body_direct") or "").strip()
+        span = f"{t}\n{b}" if (t and b) else (t or b)
+        if _is_iww_clause(span):
+            iww_index = i
+            break
+
+    if iww_index is None:
+        # No IWW — append sig records at the end (post sort).
+        return non_sig_records + sig_records
+
+    # Splice the sig records in immediately after the IWW.
+    return (
+        non_sig_records[: iww_index + 1]
+        + sig_records
+        + non_sig_records[iww_index + 1 :]
+    )
 
 
 def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -2377,10 +2614,20 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
     # exhibit-number echoes). These are filing metadata wedged between
     # the SEC envelope and the agreement body.
     sections = _drop_pre_title_cover_records(sections)
-    # Merge fragmented signature-block records so each party's signature
-    # block is ONE record (symmetric across all parties).
-    sections = _merge_signature_blocks(sections)
+    # Explode the signature page per the title-as-root rubric:
+    #   - IWW operating clause sits at L1 (signature-page header).
+    #   - Each signature-page line (party label, /s/, name, title,
+    #     address) is its OWN flat L2 record.
+    #   - Signature-page banner chrome ("SIGNATURE PAGE TO FOLLOW",
+    #     "[Signature Page Follows]") is dropped.
+    sections = _explode_signature_block_lines(sections)
     sections = _sort_records_by_source_position(sections, idx)
+    # Anchor sig-line records to the IWW position. The position sorter
+    # uses source-text matching, which mis-locates short sig-line
+    # strings like a party-name label that also occurs inside another
+    # clause's body. Structural anchor: the sig block is one contiguous
+    # cluster immediately after the IWW operating clause.
+    sections = _consolidate_sig_lines_after_iww(sections)
 
     base["parse_status"] = "ok"
     base["n_section_nodes"] = len(sections)

@@ -2416,10 +2416,24 @@ def _split_inline_section_markers(rows: list[dict[str, Any]]) -> list[dict[str, 
         # ". 14." — these indicate top-level numbered sections embedded
         # in the body text.
         # Use a stricter regex: number followed by period, whitespace, capital letter.
-        markers = list(re.finditer(
+        raw_markers = list(re.finditer(
             r"(?:(?<=[.\s\xa0])|^)(\d+)\.\s*[A-Z]",
             body,
         ))
+        # Filter out cross-references: a marker preceded by "Section"
+        # or "Sections" (case-insensitive, with optional whitespace/nbsp)
+        # is a textual reference like "this Section 5." or "Sections 7,
+        # 8 and 9 hereof", not a fresh top-level section heading. The
+        # tail context window covers up to 15 chars before the marker —
+        # enough for "Sections " variants without being so wide that it
+        # picks up unrelated mentions.
+        markers = []
+        _SECTION_REF_RE = re.compile(r"(?i)\bSections?\s*[\xa0\s]*$")
+        for m in raw_markers:
+            pre = body[max(0, m.start() - 15):m.start()]
+            if _SECTION_REF_RE.search(pre):
+                continue
+            markers.append(m)
         if len(markers) < 2:
             continue
 
@@ -3397,6 +3411,160 @@ def _split_sig_block_body_into_lines(body: str) -> list[str]:
     return out
 
 
+def _split_iww_and_sig_from_body(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Extract an inline IN WITNESS WHEREOF + signature block from a body.
+
+    doc2dict sometimes packs the entire signature page — IWW operating
+    clause, party labels, /s/ marks, By:/Name:/Title: fields — into the
+    trailing body text of the LAST lettered subsection of the main
+    agreement (e.g. "(j) Waiver of Breach" picks up everything that the
+    HTML walker couldn't promote into its own node). This destroys the
+    signature-page hierarchy mandated by the title-as-root rubric
+    (level_rubric.md §"Signature-page content emitted at the wrong
+    depth"): the IWW clause should be L1 and each sig-page line should
+    be L2.
+
+    Structural detection (purely shape-based, no phrase matching):
+
+      1. The document has ZERO existing records whose title/body STARTS
+         with the IWW phrase. If any record already carries IWW as its
+         leading text, the sig page is already correctly separated and
+         this function is a no-op for that document.
+      2. Find a record whose body contains the IWW phrase MID-body (not
+         at position 0). The text before the IWW is the record's real
+         body; the text from IWW onward is the misplaced sig page.
+      3. Split:
+           - Keep the prefix on the original record.
+           - Emit the IWW operating clause sentence as a new L1 record
+             (depth = 1 + subdoc_penalty).
+           - Split the remainder by newlines into sig-line L2 records
+             (depth = 2 + subdoc_penalty). Each non-empty, non-banner
+             line becomes its own L2 record. Duplicate consecutive
+             lines (a doc2dict pathology in this idx) are collapsed.
+
+    This function runs BEFORE `_explode_signature_block_lines` so the
+    new sig-line records get the standard sig-line marking. The IWW
+    record is detected by that pass via `_is_iww_clause` and pinned
+    at L1.
+    """
+    # Guard: only act when no existing record carries IWW as leading text.
+    # Without this, we'd double-split documents that already have a clean
+    # IWW record (the prior idxs) and break their frozen baselines.
+    for r in rows:
+        if r.get("is_envelope") or r.get("scope") == "trailer":
+            continue
+        title = (r.get("title") or "").strip()
+        body = (r.get("body_direct") or "").strip()
+        if _is_iww_clause(title) or _is_iww_clause(body):
+            return rows
+
+    _IWW_INLINE_RE = re.compile(r"(?i)IN\s+WITNESS\s+WHEREOF")
+
+    next_id = max((r["node_id"] for r in rows), default=-1) + 1
+    new_rows: list[dict[str, Any]] = []
+
+    for r in rows:
+        new_rows.append(r)
+        if r.get("is_envelope") or r.get("scope") == "trailer":
+            continue
+        body = r.get("body_direct") or ""
+        if not body:
+            continue
+        m = _IWW_INLINE_RE.search(body)
+        # Require IWW NOT at start (start-of-body IWW is already its own
+        # record from the guard above). Require some substantive prefix
+        # so we don't strip a record whose body IS the sig page.
+        if not m or m.start() == 0:
+            continue
+
+        # Split body at IWW position. Prefix stays on the original record.
+        prefix = body[:m.start()].rstrip()
+        iww_and_after = body[m.start():]
+
+        # The IWW operating clause sentence ends at the first period
+        # following the IWW phrase. The sig lines follow.
+        end_period = iww_and_after.find(".", m.end() - m.start())
+        if end_period == -1:
+            # No period — treat whole text as IWW (no sig lines parsed
+            # separately). Skip; better to leave the body intact than
+            # emit a malformed record.
+            continue
+        iww_sentence = iww_and_after[:end_period + 1].strip()
+        sig_rest = iww_and_after[end_period + 1:]
+
+        # Update original record body to just the prefix.
+        r["body_direct"] = prefix
+        r["body_direct_chars"] = len(prefix)
+
+        subdoc_penalty = r.get("subdoc_penalty") or 0
+        l1_depth = 1 + subdoc_penalty
+        l2_depth = 2 + subdoc_penalty
+
+        # Emit the IWW operating clause as L1.
+        iww_record = {
+            "node_id": next_id,
+            "parent_node_id": r.get("parent_node_id"),
+            "depth": l1_depth,
+            "doc2dict_section_key": f"_iww_{next_id}",
+            "cls": "promoted text leaf",
+            "title": "",
+            "standardized_title": None,
+            "n_direct_section_children": 0,
+            "body_direct_chars": len(iww_sentence),
+            "body_recursive_chars": len(iww_sentence),
+            "body_direct": iww_sentence,
+            "body_recursive": iww_sentence,
+            "subdoc_penalty": subdoc_penalty,
+            "is_envelope": False,
+            "scope": "agreement",
+        }
+        new_rows.append(iww_record)
+        next_id += 1
+        iww_node_id = iww_record["node_id"]
+
+        # Split sig_rest into per-line records. Drop empty lines, drop
+        # banner/page-number/exhibit-footer chrome, dedupe lines (doc2dict
+        # in this idx duplicates labels, party names, and /s/ marks
+        # because the source HTML repeats each block twice). A real sig
+        # block has each line unique — party labels appear once, /s/
+        # marks are unique per signer, names are unique per signer — so
+        # global per-block dedup is structurally correct here. Records
+        # are marked `_sig_line=True` so `_consolidate_sig_lines_after_iww`
+        # anchors them as one contiguous cluster right after the IWW
+        # operating clause regardless of how the source-position sorter
+        # places short label probes ("Company", "Executive") that match
+        # in the agreement body.
+        lines = _split_sig_block_body_into_lines(sig_rest)
+        seen_lines: set[str] = set()
+        for line in lines:
+            if line in seen_lines:
+                continue  # collapse duplicate
+            seen_lines.add(line)
+            new_rows.append({
+                "node_id": next_id,
+                "parent_node_id": iww_node_id,
+                "depth": l2_depth,
+                "doc2dict_section_key": f"_sig_line_{next_id}",
+                "cls": "promoted text leaf",
+                "title": line,
+                "standardized_title": None,
+                "n_direct_section_children": 0,
+                "body_direct_chars": 0,
+                "body_recursive_chars": len(line),
+                "body_direct": "",
+                "body_recursive": line,
+                "subdoc_penalty": subdoc_penalty,
+                "is_envelope": False,
+                "scope": "agreement",
+                "_sig_line": True,
+            })
+            next_id += 1
+
+    return new_rows
+
+
 def _explode_signature_block_lines(
     rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -3949,6 +4117,14 @@ def parse_one(idx: int, raw: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
     # exhibit-number echoes). These are filing metadata wedged between
     # the SEC envelope and the agreement body.
     sections = _drop_pre_title_cover_records(sections)
+    # Split inline "IN WITNESS WHEREOF" + signature page out of a body.
+    # doc2dict sometimes packs the entire sig page into the trailing body
+    # of the LAST lettered subsection when the HTML walker couldn't
+    # promote it. This pass detects that pathology STRUCTURALLY (no
+    # existing IWW record in the document, IWW phrase appearing mid-body)
+    # and emits IWW as L1 + each sig-page line as L2 — restoring the
+    # title-as-root sig-page hierarchy.
+    sections = _split_iww_and_sig_from_body(sections)
     # Explode the signature page per the title-as-root rubric:
     #   - IWW operating clause sits at L1 (signature-page header).
     #   - Each signature-page line (party label, /s/, name, title,

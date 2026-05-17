@@ -6,7 +6,8 @@
     2,
     3,
     4,
-    5
+    5,
+    6
   ],
   "history": [
     {
@@ -139,6 +140,30 @@
       "action": "freeze",
       "idx": 5,
       "n_records": 18
+    },
+    {
+      "ts": "2026-05-17T06:33:11",
+      "action": "freeze",
+      "idx": 6,
+      "n_records": 55
+    },
+    {
+      "ts": "2026-05-17T06:39:26",
+      "action": "freeze",
+      "idx": 6,
+      "n_records": 67
+    },
+    {
+      "ts": "2026-05-17T06:42:00",
+      "action": "freeze",
+      "idx": 6,
+      "n_records": 69
+    },
+    {
+      "ts": "2026-05-17T06:44:47",
+      "action": "freeze",
+      "idx": 6,
+      "n_records": 69
     }
   ]
 }

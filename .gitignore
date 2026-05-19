@@ -61,3 +61,4 @@ data/local/
 # --- Build artifacts ---
 *.log
 *.tmp
+.claude/worktrees/
